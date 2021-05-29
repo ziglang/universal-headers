@@ -1,5 +1,7 @@
 # The Universal Headers Project
 
+** STATUS: VAPORWARE **
+
 This project distributes a set of C headers (.h files) that are compatible with
 widely used libcs for various targets.
 
@@ -15,10 +17,47 @@ In the context of Zig, this project exists to facilitate
 [ziglang/zig#2879](https://github.com/ziglang/zig/issues/2879).
 Idea being that the end-result we want to eventually accomplish, is a set of
 multi-target C headers (this project) plus implementations of the functions in
-Zig. The C header from this project would be periodically synchronized into the
+Zig. The C headers from this project would be periodically synchronized into the
 Zig repository upstream.
 
-## Supported Targets
+The files are in `include/`. Everything else in this repository exists to aid
+the creation and maintenance of those files.
+
+## Strategy
+
+When files are very different, the idea is to keep the different files in
+subdirectories and use the preprocessor to `#include` them as appropriate
+depending on target information.
+
+When files are very similar, the idea is to edit the files so that different
+targets share the same files, and the preprocessor is used to contain the
+differences between targets.
+
+This will require carefully backporting changes if any of the libcs change
+upstream.
+
+Some preprocessor defines are already present to communicate the target; for
+example the presence of `_WIN32` can be used to detect the Windows operating
+system. However others are not available; for example there is no preprocessor
+definition available to detect the difference between gnu or musl ABI. So this
+project needs to define some custom preprocessor macros that can be used this
+way.
+
+We may want to look into automating this by parsing .h files and intelligently,
+using type information, determine what is the same and what is different per
+target, and then generate the .h files based on this information. Then this
+repository would have a set of headers as inputs, and a set of headers as
+outputs. The idea would be that the outputs would be fewer size in bytes
+because of deduplication, support all the targets without any `-I` flags
+needing to be different because of preprocessor usage, and the update process
+would look like copy+pasting new versions of upstream headers into the input
+headers, and then re-running the processing step.
+
+This will reduce the effort needed to add support for more libcs, as well as
+keep the installation size of the headers small, even as the number of
+supported targets grows large.
+
+## Desired Targets
 
  * [Mingw-w64](http://mingw-w64.org/) Headers
    - x86_64-windows-gnu
@@ -67,11 +106,18 @@ Zig repository upstream.
  * Not associated with any particular implementation:
    - wasm-wasi-musl
    - wasm-freestanding-musl
+ * FreeBSD
+ * NetBSD
+ * DragonFlyBSD
+ * OpenBSD
+ * Fuchsia
+ * Haiku
+ * Freestanding
 
 ## License
 
-This project is MIT (Expat) licensed. It contains derived work from various
-other licenses:
+This project is MIT (Expat) licensed. It will contained derived work from
+various other licenses:
  
  * Public Domain
  * APSL
