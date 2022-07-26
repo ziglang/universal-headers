@@ -101,8 +101,11 @@ supported targets grows large.
    - sparc-linux-gnu
    - sparcv9-linux-gnu
  * MacOS
-   - aarch64-macos-gnu
-   - x86_64-macos-gnu
+   - x86_64-macos.10-none
+   - x86_64-macos.11-none
+   - x86_64-macos.12-none
+   - aarch64-macos.11-none
+   - aarch64-macos.12-none
  * Not associated with any particular implementation:
    - wasm-wasi-musl
    - wasm-freestanding-musl
