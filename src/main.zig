@@ -443,6 +443,14 @@ const Merger = struct {
                     const source_bytes = comp.getSource(tokens[0].source).buf;
                     break :b source_bytes[tokens[0].start..tokens[tokens.len - 1].end];
                 };
+                // avoid emitting symbols which would define a macro already defined
+                if (macro_set.get(name)) |dep_macro| {
+                    switch (dep_macro) {
+                        .def => if (body.len == 0) continue,
+                        .string => |s| if (mem.eql(u8, body, s)) continue,
+                        .undef => {},
+                    }
+                }
                 std.debug.print("found macro: '{s}': '{s}'\n", .{ name, body });
                 try m.all_symbols.append(m.arena, .{
                     .defines = macro_set,
