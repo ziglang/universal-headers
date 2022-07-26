@@ -12,12 +12,7 @@ const Input = struct {
     target: Target,
     // These need to be unique enough to distinguish between the inputs.
     // In other words, no two inputs should have an identical set of defines.
-    defines: []const DefineKV,
-
-    const DefineKV = struct {
-        name: []const u8,
-        define: Define,
-    };
+    defines: []const NamedDefine,
 };
 
 const inputs = [_]Input{
@@ -95,10 +90,26 @@ const inputs = [_]Input{
 const HeaderTable = std.StringHashMap(std.ArrayListUnmanaged(Header));
 const Defines = std.StringArrayHashMapUnmanaged(Define);
 
+const NamedDefine = struct {
+    name: []const u8,
+    define: Define,
+};
+
 const Define = union(enum) {
     undef,
     def,
     string: []const u8,
+
+    fn eql(a: Define, b: Define) bool {
+        switch (a) {
+            .undef => return b == .undef,
+            .def => return b == .def,
+            .string => |a_s| switch (b) {
+                .undef, .def => return false,
+                .string => |b_s| return mem.eql(u8, a_s, b_s),
+            },
+        }
+    }
 };
 
 const Header = struct {
@@ -198,33 +209,66 @@ pub fn main() !void {
         var bw = std.io.bufferedWriter(out_file.writer());
         const w = bw.writer();
 
+        const State = std.StringHashMapUnmanaged(Define);
+        var state_stack = std.ArrayList(State).init(arena);
+        try state_stack.append(.{});
+
         for (merger.all_symbols.items) |symbol| {
+            // Determine what is different from the current state.
             const define_names = symbol.defines.keys();
             const define_values = symbol.defines.values();
-            try w.writeAll("#if ");
-            for (define_values) |define_value, i| {
-                if (i != 0) try w.writeAll(" && ");
-                const define_name = define_names[i];
-                switch (define_value) {
-                    .def => {
-                        try w.print("defined({s})", .{define_name});
-                    },
-                    .undef => {
-                        try w.print("!defined({s})", .{define_name});
-                    },
-                    .string => |s| {
-                        try w.print("{s} == {s}", .{ define_name, s });
-                    },
+
+            // Pop until we have no conflicts with the current state.
+            search: while (true) {
+                const top = &state_stack.items[state_stack.items.len - 1];
+                for (define_values) |define_value, i| {
+                    const define_name = define_names[i];
+                    if (top.get(define_name)) |cur_define| {
+                        if (!cur_define.eql(define_value)) {
+                            try w.writeAll("#endif\n");
+                            _ = state_stack.pop();
+                            continue :search;
+                        }
+                    }
                 }
+                break;
             }
-            try w.writeAll("\n");
+
+            // Push until all constraints are satisfied.
+            cond: while (true) {
+                const top = &state_stack.items[state_stack.items.len - 1];
+                for (define_values) |define_value, i| {
+                    const define_name = define_names[i];
+                    if (top.contains(define_name)) continue;
+
+                    var new_state = try top.clone(arena);
+                    try new_state.put(arena, define_name, define_value);
+                    try state_stack.append(new_state);
+
+                    switch (define_value) {
+                        .def => {
+                            try w.print("#ifdef {s}\n", .{define_name});
+                        },
+                        .undef => {
+                            try w.print("#ifndef {s}\n", .{define_name});
+                        },
+                        .string => |s| {
+                            try w.print("#if {s} == {s}\n", .{ define_name, s });
+                        },
+                    }
+                    continue :cond;
+                }
+                break;
+            }
 
             if (symbol.contents.len == 0) {
                 try w.print("#define {s}\n", .{symbol.identifier});
             } else {
                 try w.print("#define {s} {s}\n", .{ symbol.identifier, symbol.contents });
             }
+        }
 
+        for (state_stack.items[1..]) |_| {
             try w.writeAll("#endif\n");
         }
 
@@ -252,11 +296,6 @@ const Merger = struct {
             m.h_path, m.all_symbols.items.len,
         });
 
-        // Each symbol from the list needs to be accounted for. First we try
-        // to prune symbols.
-
-        // not sure how to prune symbols yet tbh
-
         // Score each define to find out which ones apply to the most symbols.
         var define_scores = std.StringHashMap(u32).init(m.arena);
         for (m.all_symbols.items) |symbol| {
@@ -270,6 +309,66 @@ const Merger = struct {
                 gop.value_ptr.* += 1;
             }
         }
+
+        // Each symbol from the list needs to be accounted for. First we try
+        // to prune symbols.
+
+        //{
+        //    // Prune preprocessor dependencies that have no effect.
+        //    var it = define_scores.iterator();
+        //    while (it.next()) |entry| {
+        //        const define_name = entry.key_ptr.*;
+
+        //        var prune_map = std.AutoHashMap().init(m.arena);
+        //        // If every symbol with the same name has the same contents, ignoring this define,
+        //        // but honoring other defines, then we can remove this define entirely.
+
+        //    }
+        //}
+
+        //{
+        //    // Prune preprocessor dependencies that never change.
+        //    const Index = enum(u32) { none = std.math.maxInt(u32), _ };
+        //    var unchanging_defines = std.StringHashMap(Index).init(m.arena);
+        //    {
+        //        var it = define_scores.iterator();
+        //        while (it.next()) |entry| {
+        //            const define_name = entry.key_ptr.*;
+        //            try unchanging_defines.put(define_name, .none);
+        //        }
+        //    }
+        //    for (m.all_symbols.items) |symbol| {
+        //        const define_names = symbol.defines.keys();
+        //        const define_values = symbol.defines.values();
+        //        for (define_names) |define_name, i| {
+        //            if (unchanging_defines.getEntry(define_name)) |entry| {
+        //                const example_sym_index = entry.value_ptr.*;
+        //                if (example_sym_index == .none) {
+        //                    try unchanging_defines.put(define_name, @intToEnum(Index, i));
+        //                } else if (!m.all_symbols.items[@enumToInt(example_sym_index)].defines.get(define_name).?.eql(define_values[i])) {
+        //                    assert(unchanging_defines.remove(define_name));
+        //                }
+        //            }
+        //        }
+        //    }
+        //    if (unchanging_defines.count() != 0) {
+        //        var it = unchanging_defines.iterator();
+        //        while (it.next()) |entry| {
+        //            const define_name = entry.key_ptr.*;
+        //            std.debug.print("pruning {s} because it never changes\n", .{define_name});
+
+        //            try m.global_defines.append(m.arena, .{
+        //                .name = define_name,
+        //                .define = m.all_symbols.items[@enumToInt(entry.value_ptr.*)].defines.get(define_name).?,
+        //            });
+
+        //            for (m.all_symbols.items) |*symbol| {
+        //                _ = symbol.defines.swapRemove(define_name);
+        //            }
+        //            assert(define_scores.remove(entry.key_ptr.*));
+        //        }
+        //    }
+        //}
 
         // Now each symbol's defines table needs to be sorted according to these scores.
         for (m.all_symbols.items) |*symbol| {
@@ -290,14 +389,6 @@ const Merger = struct {
 
         std.sort.sort(Symbol, m.all_symbols.items, &define_scores, struct {
             pub fn lessThan(context: *std.StringHashMap(u32), lhs: Symbol, rhs: Symbol) bool {
-                const result = unsafeLessThan(context, lhs, rhs);
-                //if (result and unsafeLessThan(context, rhs, lhs)) {
-                //    std.debug.print("bad inputs: {s} {s}", .{ lhs.identifier, rhs.identifier });
-                //}
-                return result;
-            }
-
-            fn unsafeLessThan(context: *std.StringHashMap(u32), lhs: Symbol, rhs: Symbol) bool {
                 // TODO notice symbol dependencies, prioritize those
 
                 // Now we sort by the defines that apply to the most symbols.
