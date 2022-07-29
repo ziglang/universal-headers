@@ -118,9 +118,12 @@ const Header = struct {
 };
 
 const Symbol = struct {
-    /// Definitions that this symbol depends on. This symbol could
-    /// depend on the absence of a definition or the presence of a definition.
-    defines: Defines,
+    // This is using Disjunctive Normal Form.
+    // The inner list is each Define AND'd together.
+    // The outer list OR's those inner lists together.
+    // This field acts as a condition. If the condition holds, then the
+    // identifier exists with contents.
+    clauses: []Defines,
     identifier: []const u8,
     contents: []const u8,
 };
@@ -299,9 +302,8 @@ const Merger = struct {
         // Score each define to find out which ones apply to the most symbols.
         var define_scores = std.StringHashMap(u32).init(m.arena);
         for (m.all_symbols.items) |symbol| {
-            var it = symbol.defines.iterator();
-            while (it.next()) |entry| {
-                const name = entry.key_ptr.*;
+            if (symbol.clauses.len < 1) continue;
+            for (symbol.clauses[0].keys()) |name| {
                 const gop = try define_scores.getOrPut(name);
                 if (!gop.found_existing) {
                     gop.value_ptr.* = 0;
@@ -313,78 +315,23 @@ const Merger = struct {
         // Each symbol from the list needs to be accounted for. First we try
         // to prune symbols.
 
-        //{
-        //    // Prune preprocessor dependencies that have no effect.
-        //    var it = define_scores.iterator();
-        //    while (it.next()) |entry| {
-        //        const define_name = entry.key_ptr.*;
-
-        //        var prune_map = std.AutoHashMap().init(m.arena);
-        //        // If every symbol with the same name has the same contents, ignoring this define,
-        //        // but honoring other defines, then we can remove this define entirely.
-
-        //    }
-        //}
-
-        //{
-        //    // Prune preprocessor dependencies that never change.
-        //    const Index = enum(u32) { none = std.math.maxInt(u32), _ };
-        //    var unchanging_defines = std.StringHashMap(Index).init(m.arena);
-        //    {
-        //        var it = define_scores.iterator();
-        //        while (it.next()) |entry| {
-        //            const define_name = entry.key_ptr.*;
-        //            try unchanging_defines.put(define_name, .none);
-        //        }
-        //    }
-        //    for (m.all_symbols.items) |symbol| {
-        //        const define_names = symbol.defines.keys();
-        //        const define_values = symbol.defines.values();
-        //        for (define_names) |define_name, i| {
-        //            if (unchanging_defines.getEntry(define_name)) |entry| {
-        //                const example_sym_index = entry.value_ptr.*;
-        //                if (example_sym_index == .none) {
-        //                    try unchanging_defines.put(define_name, @intToEnum(Index, i));
-        //                } else if (!m.all_symbols.items[@enumToInt(example_sym_index)].defines.get(define_name).?.eql(define_values[i])) {
-        //                    assert(unchanging_defines.remove(define_name));
-        //                }
-        //            }
-        //        }
-        //    }
-        //    if (unchanging_defines.count() != 0) {
-        //        var it = unchanging_defines.iterator();
-        //        while (it.next()) |entry| {
-        //            const define_name = entry.key_ptr.*;
-        //            std.debug.print("pruning {s} because it never changes\n", .{define_name});
-
-        //            try m.global_defines.append(m.arena, .{
-        //                .name = define_name,
-        //                .define = m.all_symbols.items[@enumToInt(entry.value_ptr.*)].defines.get(define_name).?,
-        //            });
-
-        //            for (m.all_symbols.items) |*symbol| {
-        //                _ = symbol.defines.swapRemove(define_name);
-        //            }
-        //            assert(define_scores.remove(entry.key_ptr.*));
-        //        }
-        //    }
-        //}
-
         // Now each symbol's defines table needs to be sorted according to these scores.
         for (m.all_symbols.items) |*symbol| {
-            symbol.defines.sort(struct {
-                define_scores: *std.StringHashMap(u32),
-                names: []const []const u8,
+            for (symbol.clauses) |*defines| {
+                defines.sort(struct {
+                    define_scores: *std.StringHashMap(u32),
+                    names: []const []const u8,
 
-                pub fn lessThan(ctx: @This(), a_index: usize, b_index: usize) bool {
-                    const a = ctx.define_scores.get(ctx.names[a_index]).?;
-                    const b = ctx.define_scores.get(ctx.names[b_index]).?;
-                    return b < a;
-                }
-            }{
-                .define_scores = &define_scores,
-                .names = symbol.defines.keys(),
-            });
+                    pub fn lessThan(ctx: @This(), a_index: usize, b_index: usize) bool {
+                        const a = ctx.define_scores.get(ctx.names[a_index]).?;
+                        const b = ctx.define_scores.get(ctx.names[b_index]).?;
+                        return b < a;
+                    }
+                }{
+                    .define_scores = &define_scores,
+                    .names = defines.keys(),
+                });
+            }
         }
 
         std.sort.sort(Symbol, m.all_symbols.items, &define_scores, struct {
@@ -544,7 +491,7 @@ const Merger = struct {
                 }
                 std.debug.print("found macro: '{s}': '{s}'\n", .{ name, body });
                 try m.all_symbols.append(m.arena, .{
-                    .defines = macro_set,
+                    .clauses = try definesToClauses(m.arena, macro_set),
                     .identifier = try m.arena.dupe(u8, name),
                     .contents = try m.arena.dupe(u8, body),
                 });
@@ -593,3 +540,9 @@ const Merger = struct {
         }
     }
 };
+
+fn definesToClauses(arena: Allocator, defines: Defines) ![]Defines {
+    const result = try arena.alloc(Defines, 1);
+    result[0] = defines;
+    return result;
+}
