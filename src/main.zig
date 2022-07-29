@@ -477,7 +477,7 @@ const Merger = struct {
                 var it = macro_set.iterator();
                 while (it.next()) |entry| {
                     const name = entry.key_ptr.*;
-                    try pp.ok_defines.put(comp.gpa, name, .{});
+                    try pp.ok_defines.put(comp.gpa, name, {});
                     switch (entry.value_ptr.*) {
                         .def => {
                             try macro_buf.writer().print("#define {s}\n", .{name});
