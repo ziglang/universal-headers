@@ -117,13 +117,17 @@ const Header = struct {
     source_bytes: []const u8,
 };
 
+// This is using Conjunctive Normal Form.
+// The inner list is each Define OR'd together.
+// The outer list AND's those inner lists together.
+const Clauses = struct {
+    conjunctives: [][]NamedDefine,
+};
+
 const Symbol = struct {
-    // This is using Disjunctive Normal Form.
-    // The inner list is each Define AND'd together.
-    // The outer list OR's those inner lists together.
     // This field acts as a condition. If the condition holds, then the
     // identifier exists with contents.
-    clauses: []Defines,
+    clauses: Clauses,
     identifier: []const u8,
     contents: []const u8,
 };
@@ -212,68 +216,101 @@ pub fn main() !void {
         var bw = std.io.bufferedWriter(out_file.writer());
         const w = bw.writer();
 
-        const State = std.StringHashMapUnmanaged(Define);
-        var state_stack = std.ArrayList(State).init(arena);
-        try state_stack.append(.{});
-
         for (merger.all_symbols.items) |symbol| {
-            // Determine what is different from the current state.
-            const define_names = symbol.defines.keys();
-            const define_values = symbol.defines.values();
-
-            // Pop until we have no conflicts with the current state.
-            search: while (true) {
-                const top = &state_stack.items[state_stack.items.len - 1];
-                for (define_values) |define_value, i| {
-                    const define_name = define_names[i];
-                    if (top.get(define_name)) |cur_define| {
-                        if (!cur_define.eql(define_value)) {
-                            try w.writeAll("#endif\n");
-                            _ = state_stack.pop();
-                            continue :search;
-                        }
-                    }
+            try w.print("#if ", .{});
+            for (symbol.clauses.conjunctives) |conjunctive, conjunctive_i| {
+                if (conjunctive_i != 0) try w.writeAll(" && ");
+                if (conjunctive.len > 1) {
+                    try w.writeAll("(");
                 }
-                break;
-            }
-
-            // Push until all constraints are satisfied.
-            cond: while (true) {
-                const top = &state_stack.items[state_stack.items.len - 1];
-                for (define_values) |define_value, i| {
-                    const define_name = define_names[i];
-                    if (top.contains(define_name)) continue;
-
-                    var new_state = try top.clone(arena);
-                    try new_state.put(arena, define_name, define_value);
-                    try state_stack.append(new_state);
-
-                    switch (define_value) {
+                for (conjunctive) |named_define, define_i| {
+                    if (define_i != 0) try w.writeAll(" || ");
+                    switch (named_define.define) {
                         .def => {
-                            try w.print("#ifdef {s}\n", .{define_name});
+                            try w.print("defined({s})", .{named_define.name});
                         },
                         .undef => {
-                            try w.print("#ifndef {s}\n", .{define_name});
+                            try w.print("!defined({s})", .{named_define.name});
                         },
                         .string => |s| {
-                            try w.print("#if {s} == {s}\n", .{ define_name, s });
+                            try w.print("{s} == {s}", .{ named_define.name, s });
                         },
                     }
-                    continue :cond;
                 }
-                break;
+                if (conjunctive.len > 1) {
+                    try w.writeAll(")");
+                }
             }
+            try w.print("\n", .{});
 
             if (symbol.contents.len == 0) {
                 try w.print("#define {s}\n", .{symbol.identifier});
             } else {
                 try w.print("#define {s} {s}\n", .{ symbol.identifier, symbol.contents });
             }
+
+            try w.print("#endif\n", .{});
         }
 
-        for (state_stack.items[1..]) |_| {
-            try w.writeAll("#endif\n");
-        }
+        //const State = std.StringHashMapUnmanaged(Define);
+        //var state_stack = std.ArrayList(Clauses).init(arena);
+        //try state_stack.append(.{});
+
+        //for (merger.all_symbols.items) |symbol| {
+        //    // Pop until we have no conflicts with the current state.
+        //    search: while (true) {
+        //        const top = &state_stack.items[state_stack.items.len - 1];
+        //        for (symbol.clauses) |conjunction| {
+        //            for (conjunction) |sym_define| {
+        //                if (top.get(sym_define.name)) |cur_define| {
+        //                    if (!cur_define.eql(sym_define)) {
+        //                        try w.writeAll("#endif\n");
+        //                        _ = state_stack.pop();
+        //                        continue :search;
+        //                    }
+        //                }
+        //            }
+        //        }
+        //        break;
+        //    }
+
+        //    // Push until all constraints are satisfied.
+        //    cond: while (true) {
+        //        const top = &state_stack.items[state_stack.items.len - 1];
+        //        for (symbol.clauses) |conjunction| {
+        //            const define_name = define_names[i];
+        //            if (top.contains(define_name)) continue;
+
+        //            var new_state = try top.clone(arena);
+        //            try new_state.put(arena, define_name, define_value);
+        //            try state_stack.append(new_state);
+
+        //            switch (define_value) {
+        //                .def => {
+        //                    try w.print("#ifdef {s}\n", .{define_name});
+        //                },
+        //                .undef => {
+        //                    try w.print("#ifndef {s}\n", .{define_name});
+        //                },
+        //                .string => |s| {
+        //                    try w.print("#if {s} == {s}\n", .{ define_name, s });
+        //                },
+        //            }
+        //            continue :cond;
+        //        }
+        //        break;
+        //    }
+
+        //    if (symbol.contents.len == 0) {
+        //        try w.print("#define {s}\n", .{symbol.identifier});
+        //    } else {
+        //        try w.print("#define {s} {s}\n", .{ symbol.identifier, symbol.contents });
+        //    }
+        //}
+
+        //for (state_stack.items[1..]) |_| {
+        //    try w.writeAll("#endif\n");
+        //}
 
         try bw.flush();
     }
@@ -302,8 +339,9 @@ const Merger = struct {
         // Score each define to find out which ones apply to the most symbols.
         var define_scores = std.StringHashMap(u32).init(m.arena);
         for (m.all_symbols.items) |symbol| {
-            if (symbol.clauses.len < 1) continue;
-            for (symbol.clauses[0].keys()) |name| {
+            for (symbol.clauses.conjunctives) |conjunctive| {
+                // only score the first OR
+                const name = conjunctive[0].name;
                 const gop = try define_scores.getOrPut(name);
                 if (!gop.found_existing) {
                     gop.value_ptr.* = 0;
@@ -316,33 +354,34 @@ const Merger = struct {
         // to prune symbols.
 
         // Now each symbol's defines table needs to be sorted according to these scores.
-        for (m.all_symbols.items) |*symbol| {
-            for (symbol.clauses) |*defines| {
-                defines.sort(struct {
-                    define_scores: *std.StringHashMap(u32),
-                    names: []const []const u8,
+        //for (m.all_symbols.items) |*symbol| {
+        //    for (symbol.clauses) |*defines| {
+        //        defines.sort(struct {
+        //            define_scores: *std.StringHashMap(u32),
+        //            names: []const []const u8,
 
-                    pub fn lessThan(ctx: @This(), a_index: usize, b_index: usize) bool {
-                        const a = ctx.define_scores.get(ctx.names[a_index]).?;
-                        const b = ctx.define_scores.get(ctx.names[b_index]).?;
-                        return b < a;
-                    }
-                }{
-                    .define_scores = &define_scores,
-                    .names = defines.keys(),
-                });
-            }
-        }
+        //            pub fn lessThan(ctx: @This(), a_index: usize, b_index: usize) bool {
+        //                const a = ctx.define_scores.get(ctx.names[a_index]).?;
+        //                const b = ctx.define_scores.get(ctx.names[b_index]).?;
+        //                return b < a;
+        //            }
+        //        }{
+        //            .define_scores = &define_scores,
+        //            .names = defines.keys(),
+        //        });
+        //    }
+        //}
 
         std.sort.sort(Symbol, m.all_symbols.items, &define_scores, struct {
             pub fn lessThan(context: *std.StringHashMap(u32), lhs: Symbol, rhs: Symbol) bool {
                 // TODO notice symbol dependencies, prioritize those
 
                 // Now we sort by the defines that apply to the most symbols.
-                const lhs_names = lhs.defines.keys();
-                const rhs_names = rhs.defines.keys();
-                for (lhs_names[0..@minimum(lhs_names.len, rhs_names.len)]) |lhs_name, i| {
-                    const rhs_name = rhs_names[i];
+                const lhs_conjunctives = lhs.clauses.conjunctives;
+                const rhs_conjunctives = rhs.clauses.conjunctives;
+                for (lhs_conjunctives[0..@minimum(lhs_conjunctives.len, rhs_conjunctives.len)]) |lhs_conjunctive, i| {
+                    const lhs_name = lhs_conjunctive[0].name;
+                    const rhs_name = rhs_conjunctives[i][0].name;
                     if (mem.eql(u8, lhs_name, rhs_name)) {
                         continue;
                     }
@@ -354,7 +393,7 @@ const Merger = struct {
                     return mem.lessThan(u8, lhs_name, rhs_name);
                 }
 
-                if (lhs_names.len < rhs_names.len) {
+                if (lhs_conjunctives.len < rhs_conjunctives.len) {
                     return true;
                 }
 
@@ -541,8 +580,15 @@ const Merger = struct {
     }
 };
 
-fn definesToClauses(arena: Allocator, defines: Defines) ![]Defines {
-    const result = try arena.alloc(Defines, 1);
-    result[0] = defines;
-    return result;
+/// converts e.g. `a and b and c` to `(a) and (b) and (c)`
+fn definesToClauses(arena: Allocator, defines: Defines) !Clauses {
+    const conjunctives = try arena.alloc([]NamedDefine, defines.count());
+    for (conjunctives) |*inner_list, i| {
+        inner_list.* = try arena.create([1]NamedDefine);
+        inner_list.*[0] = .{
+            .name = defines.keys()[i],
+            .define = defines.values()[i],
+        };
+    }
+    return .{ .conjunctives = conjunctives };
 }
