@@ -22,6 +22,7 @@ const inputs = [_]Input{
     //        .cpu = Target.Cpu.baseline(.i386),
     //        .os = Target.Os.Tag.linux.defaultVersionRange(.i386),
     //        .abi = .musl,
+    //        .ofmt = .elf,
     //    },
     //},
     //.{
@@ -30,6 +31,7 @@ const inputs = [_]Input{
     //        .cpu = Target.Cpu.baseline(.x86_64),
     //        .os = Target.Os.Tag.linux.defaultVersionRange(.x86_64),
     //        .abi = .musl,
+    //        .ofmt = .elf,
     //    },
     //},
     .{
@@ -46,6 +48,7 @@ const inputs = [_]Input{
                 },
             },
             .abi = .none,
+            .ofmt = .macho,
         },
         .defines = &.{
             .{
@@ -72,6 +75,7 @@ const inputs = [_]Input{
                 },
             },
             .abi = .none,
+            .ofmt = .macho,
         },
         .defines = &.{
             .{
