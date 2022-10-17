@@ -3,7 +3,7 @@ const mem = std.mem;
 const Allocator = mem.Allocator;
 const assert = std.debug.assert;
 const Compilation = @import("Compilation.zig");
-const Error = Compilation.Error;
+const Error = Compilation.Error || error{UnexpectedMacro};
 const Source = @import("Source.zig");
 const Tokenizer = @import("Tokenizer.zig");
 const RawToken = Tokenizer.Token;
@@ -67,6 +67,8 @@ comp: *Compilation,
 gpa: mem.Allocator,
 arena: std.heap.ArenaAllocator,
 defines: DefineMap,
+ok_defines: std.StringHashMapUnmanaged(void) = .{},
+unexpected_macro: []const u8 = undefined,
 tokens: Token.List = .{},
 token_buf: RawTokenList,
 char_buf: std.ArrayList(u8),
@@ -300,6 +302,10 @@ fn preprocessExtra(pp: *Preprocessor, source: Source) MacroError!Token {
                             return pp.fatal(directive, "too many #if nestings", .{});
 
                         const macro_name = (try pp.expectMacroName(&tokenizer)) orelse continue;
+                        if (!pp.ok_defines.contains(macro_name)) {
+                            pp.unexpected_macro = macro_name;
+                            return error.UnexpectedMacro;
+                        }
                         try pp.expectNl(&tokenizer);
                         if (pp.defines.get(macro_name) != null) {
                             if_kind.set(if_level, until_endif);
@@ -319,6 +325,10 @@ fn preprocessExtra(pp: *Preprocessor, source: Source) MacroError!Token {
                             return pp.fatal(directive, "too many #if nestings", .{});
 
                         const macro_name = (try pp.expectMacroName(&tokenizer)) orelse continue;
+                        if (!pp.ok_defines.contains(macro_name)) {
+                            pp.unexpected_macro = macro_name;
+                            return error.UnexpectedMacro;
+                        }
                         try pp.expectNl(&tokenizer);
                         if (pp.defines.get(macro_name) == null) {
                             if_kind.set(if_level, until_endif);
