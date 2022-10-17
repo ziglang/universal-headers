@@ -70,10 +70,10 @@ pub fn signExtend(v: Value, old_ty: Type, comp: *Compilation) i64 {
 pub fn minUnsignedBits(v: Value, ty: Type, comp: *const Compilation) usize {
     assert(v.compare(.gte, Value.int(0), ty, comp));
     return switch (ty.sizeof(comp).?) {
-        1 => 8 - @clz(u8, v.getInt(u8)),
-        2 => 16 - @clz(u16, v.getInt(u16)),
-        4 => 32 - @clz(u32, v.getInt(u32)),
-        8 => 64 - @clz(u64, v.getInt(u64)),
+        1 => 8 - @clz(v.getInt(u8)),
+        2 => 16 - @clz(v.getInt(u16)),
+        4 => 32 - @clz(v.getInt(u32)),
+        8 => 64 - @clz(v.getInt(u64)),
         else => unreachable,
     };
 }
@@ -110,10 +110,10 @@ test "minUnsignedBits" {
 pub fn minSignedBits(v: Value, ty: Type, comp: *const Compilation) usize {
     assert(v.compare(.lt, Value.int(0), ty, comp));
     return switch (ty.sizeof(comp).?) {
-        1 => 8 - @clz(u8, ~v.getInt(u8)) + 1,
-        2 => 16 - @clz(u16, ~v.getInt(u16)) + 1,
-        4 => 32 - @clz(u32, ~v.getInt(u32)) + 1,
-        8 => 64 - @clz(u64, ~v.getInt(u64)) + 1,
+        1 => 8 - @clz(~v.getInt(u8)) + 1,
+        2 => 16 - @clz(~v.getInt(u16)) + 1,
+        4 => 32 - @clz(~v.getInt(u32)) + 1,
+        8 => 64 - @clz(~v.getInt(u64)) + 1,
         else => unreachable,
     };
 }
@@ -163,9 +163,9 @@ fn floatToIntExtra(comptime FloatTy: type, int_ty_signedness: std.builtin.Signed
     const was_zero = float_val == 0;
     const had_fraction = std.math.modf(float_val).fpart != 0;
 
-    inline for ([_]std.builtin.Signedness{ .signed, .unsigned }) |signedness| {
-        inline for ([_]u16{ 1, 2, 4, 8 }) |bytecount| {
-            if (signedness == int_ty_signedness and bytecount == int_ty_size) {
+    switch (int_ty_signedness) {
+        inline else => |signedness| switch (int_ty_size) {
+            inline 1, 2, 4, 8 => |bytecount| {
                 const IntTy = std.meta.Int(signedness, bytecount * 8);
 
                 const intVal = std.math.lossyCast(IntTy, float_val);
@@ -174,10 +174,10 @@ fn floatToIntExtra(comptime FloatTy: type, int_ty_signedness: std.builtin.Signed
                 if (float_val <= std.math.minInt(IntTy) or float_val >= std.math.maxInt(IntTy)) return .out_of_range;
                 if (had_fraction) return .value_changed;
                 return .none;
-            }
-        }
+            },
+            else => unreachable,
+        },
     }
-    unreachable;
 }
 
 /// Converts the stored value from a float to an integer.
@@ -344,7 +344,7 @@ const bin_overflow = struct {
     }
 
     const FT = fn (*Value, Value, Value, Type, *Compilation) bool;
-    fn getOp(intFunc: anytype, floatFunc: anytype) FT {
+    fn getOp(comptime intFunc: anytype, comptime floatFunc: anytype) FT {
         return struct {
             fn op(res: *Value, a: Value, b: Value, ty: Type, comp: *Compilation) bool {
                 const size = ty.sizeof(comp).?;
@@ -452,7 +452,7 @@ const bin_ops = struct {
     }
 
     const FT = fn (Value, Value, Type, *Compilation) Value;
-    fn getOp(intFunc: anytype, floatFunc: anytype) FT {
+    fn getOp(comptime intFunc: anytype, comptime floatFunc: anytype) FT {
         return struct {
             fn op(a: Value, b: Value, ty: Type, comp: *Compilation) Value {
                 const size = ty.sizeof(comp).?;

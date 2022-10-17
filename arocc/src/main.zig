@@ -39,9 +39,7 @@ pub fn main() u8 {
             return 1;
         },
     };
-    if (comp.target.abi == .msvc or comp.target.os.tag == .windows) {
-        comp.langopts.setEmulatedCompiler(.msvc);
-    }
+    comp.langopts.setEmulatedCompiler(comp.systemCompiler());
 
     mainExtra(&comp, args) catch |er| switch (er) {
         error.OutOfMemory => {
@@ -98,6 +96,7 @@ const usage =
     \\
     \\Debug options:
     \\  --verbose-ast           Dump produced AST to stdout
+    \\  --verbose-pp            Dump preprocessor state
     \\
     \\
 ;
@@ -259,11 +258,11 @@ pub fn parseArgs(
                     continue;
                 };
                 comp.target = cross.toTarget(); // TODO deprecated
-                if (comp.target.abi == .msvc or comp.target.os.tag == .windows) {
-                    comp.langopts.setEmulatedCompiler(.msvc);
-                }
+                comp.langopts.setEmulatedCompiler(comp.systemCompiler());
             } else if (mem.eql(u8, arg, "--verbose-ast")) {
                 comp.verbose_ast = true;
+            } else if (mem.eql(u8, arg, "--verbose-pp")) {
+                comp.verbose_pp = true;
             } else {
                 try comp.diag.add(.{ .tag = .cli_unknown_arg, .extra = .{ .str = arg } }, &.{});
             }
@@ -386,7 +385,7 @@ fn processSource(comp: *Compilation, source: Source, builtin: Source, user_macro
 
     if (comp.diag.errors != prev_errors) return; // do not compile if there were errors
 
-    if (comp.target.getObjectFormat() != .elf or comp.target.cpu.arch != .x86_64) {
+    if (comp.target.ofmt != .elf or comp.target.cpu.arch != .x86_64) {
         return fatal(
             comp,
             "unsupported target {s}-{s}-{s}, currently only x86-64 elf is supported",
@@ -400,7 +399,7 @@ fn processSource(comp: *Compilation, source: Source, builtin: Source, user_macro
     const basename = std.fs.path.basename(source.path);
     const out_file_name = comp.output_name orelse try std.fmt.allocPrint(comp.gpa, "{s}{s}", .{
         basename[0 .. basename.len - std.fs.path.extension(source.path).len],
-        comp.target.getObjectFormat().fileExt(comp.target.cpu.arch),
+        comp.target.ofmt.fileExt(comp.target.cpu.arch),
     });
     defer if (comp.output_name == null) comp.gpa.free(out_file_name);
 

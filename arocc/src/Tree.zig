@@ -11,6 +11,10 @@ const Tree = @This();
 
 pub const Token = struct {
     id: Id,
+    flags: packed struct {
+        expansion_disabled: bool = false,
+        is_macro_arg: bool = false,
+    } = .{},
     /// This location contains the actual token slice which might be generated.
     /// If it is generated then there is guaranteed to be at least one
     /// expansion location.
@@ -134,6 +138,7 @@ pub const Node = struct {
             kind: CastKind,
         },
         int: u64,
+        return_zero: bool,
 
         pub fn forDecl(data: Data, tree: Tree) struct {
             decls: []const NodeIndex,
@@ -503,6 +508,7 @@ pub const Tag = enum(u8) {
 
     /// Inserted at the end of a function body if no return stmt is found.
     /// ty is the functions return type
+    /// data is return_zero which is true if the function is called "main" and ty is compatible with int
     implicit_return,
 
     /// Inserted in array_init_expr to represent unspecified elements.
@@ -524,6 +530,20 @@ pub const Tag = enum(u8) {
         };
     }
 };
+
+pub fn isBitfield(nodes: Node.List.Slice, node: NodeIndex) bool {
+    switch (nodes.items(.tag)[@enumToInt(node)]) {
+        .member_access_expr, .member_access_ptr_expr => {
+            const member = nodes.items(.data)[@enumToInt(node)].member;
+            var ty = nodes.items(.ty)[@enumToInt(member.lhs)];
+            if (ty.isPtr()) ty = ty.elemType();
+            const record_ty = ty.get(.@"struct") orelse ty.get(.@"union") orelse return false;
+            const field = record_ty.data.record.fields[member.index];
+            return field.bit_width != null;
+        },
+        else => return false,
+    }
+}
 
 pub fn isLval(nodes: Node.List.Slice, extra: []const NodeIndex, value_map: ValueMap, node: NodeIndex) bool {
     var is_const: bool = undefined;
@@ -624,9 +644,9 @@ fn dumpFieldAttributes(attributes: []const Attribute, level: u32, writer: anytyp
 }
 
 fn dumpAttribute(attr: Attribute, writer: anytype) !void {
-    inline for (std.meta.fields(Attribute.Tag)) |e| {
-        if (e.value == @enumToInt(attr.tag)) {
-            const args = @field(attr.args, e.name);
+    switch (attr.tag) {
+        inline else => |tag| {
+            const args = @field(attr.args, @tagName(tag));
             if (@TypeOf(args) == void) {
                 try writer.writeByte('\n');
                 return;
@@ -640,16 +660,17 @@ fn dumpAttribute(attr: Attribute, writer: anytype) !void {
                 try writer.writeAll(f.name);
                 try writer.writeAll(": ");
                 switch (f.field_type) {
-                    []const u8, ?[]const u8 => try writer.print("\"{s}\"", .{@field(args, f.name)}),
+                    []const u8 => try writer.print("\"{s}\"", .{@field(args, f.name)}),
+                    ?[]const u8 => try writer.print("\"{?s}\"", .{@field(args, f.name)}),
                     else => switch (@typeInfo(f.field_type)) {
                         .Enum => try writer.writeAll(@tagName(@field(args, f.name))),
-                        else => try writer.print("{}", .{@field(args, f.name)}),
+                        else => try writer.print("{any}", .{@field(args, f.name)}),
                     },
                 }
             }
             try writer.writeByte('\n');
             return;
-        }
+        },
     }
 }
 
@@ -685,12 +706,22 @@ fn dumpNode(tree: Tree, node: NodeIndex, level: u32, mapper: StringInterner.Type
         if (color) util.setColor(ATTRIBUTE, w);
         try w.writeAll(" lvalue");
     }
+    if (isBitfield(tree.nodes, node)) {
+        if (color) util.setColor(ATTRIBUTE, w);
+        try w.writeAll(" bitfield");
+    }
     if (tree.value_map.get(node)) |val| {
         if (color) util.setColor(LITERAL, w);
         try w.writeAll(" (value: ");
         try val.dump(ty, tree.comp, w);
         try w.writeByte(')');
     }
+    if (tag == .implicit_return and data.return_zero) {
+        if (color) util.setColor(IMPLICIT, w);
+        try w.writeAll(" (value: 0)");
+        if (color) util.setColor(.reset, w);
+    }
+
     try w.writeAll("\n");
     if (color) util.setColor(.reset, w);
 

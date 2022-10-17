@@ -7,6 +7,7 @@ const Compilation = @import("Compilation.zig");
 const Attribute = @import("Attribute.zig");
 const StringInterner = @import("StringInterner.zig");
 const StringId = StringInterner.StringId;
+const CType = @import("zig").CType;
 
 const Type = @This();
 
@@ -163,23 +164,71 @@ pub const Enum = struct {
     }
 };
 
+// might not need all 4 of these when finished,
+// but currently it helps having all 4 when diff-ing
+// the rust code.
+pub const TypeLayout = struct {
+    /// The size of the type in bits.
+    ///
+    /// This is the value returned by `sizeof` and C and `std::mem::size_of` in Rust
+    /// (but in bits instead of bytes). This is a multiple of `pointer_alignment_bits`.
+    size_bits: u64,
+    /// The alignment of the type, in bits, when used as a field in a record.
+    ///
+    /// This is usually the value returned by `_Alignof` in C, but there are some edge
+    /// cases in GCC where `_Alignof` returns a smaller value.
+    field_alignment_bits: u32,
+    /// The alignment, in bits, of valid pointers to this type.
+    ///
+    /// This is the value returned by `std::mem::align_of` in Rust
+    /// (but in bits instead of bytes). `size_bits` is a multiple of this value.
+    pointer_alignment_bits: u32,
+    /// The required alignment of the type in bits.
+    ///
+    /// This value is only used by MSVC targets. It is 8 on all other
+    /// targets. On MSVC targets, this value restricts the effects of `#pragma pack` except
+    /// in some cases involving bit-fields.
+    required_alignment_bits: u32,
+
+    pub fn init(size_bytes: u64, alignment_bytes: u64) TypeLayout {
+        return TypeLayout{
+            .size_bits = size_bytes * 8,
+            .field_alignment_bits = @intCast(u32, alignment_bytes * 8),
+            .pointer_alignment_bits = @intCast(u32, alignment_bytes * 8),
+            .required_alignment_bits = 8,
+        };
+    }
+};
+
+pub const FieldLayout = struct {
+    /// The offset of the struct, in bits, from the start of the struct.
+    offset_bits: u64,
+    /// The size, in bits, of the field.
+    ///
+    /// For bit-fields, this is the width of the field.
+    size_bits: u64,
+};
+
 // TODO improve memory usage
 pub const Record = struct {
     fields: []Field,
-    size: u64,
+    type_layout: TypeLayout,
     /// If this is null, none of the fields have attributes
     /// Otherwise, it's a pointer to N items (where N == number of fields)
     /// and the item at index i is the attributes for the field at index i
     field_attributes: ?[*][]const Attribute,
     name: StringId,
-    alignment: u29,
 
     pub const Field = struct {
         ty: Type,
         name: StringId,
         /// zero for anonymous fields
         name_tok: TokenIndex = 0,
-        bit_width: u32 = 0,
+        bit_width: ?u32 = null,
+        layout: FieldLayout = .{
+            .offset_bits = 0,
+            .size_bits = 0,
+        },
 
         pub fn isAnonymousRecord(f: Field) bool {
             return f.name_tok == 0 and f.ty.isRecord();
@@ -195,6 +244,7 @@ pub const Record = struct {
         r.name = name;
         r.fields.len = std.math.maxInt(usize);
         r.field_attributes = null;
+        r.type_layout = undefined;
         return r;
     }
 };
@@ -530,7 +580,7 @@ pub fn params(ty: Type) []Func.Param {
     };
 }
 
-pub fn arrayLen(ty: Type) ?usize {
+pub fn arrayLen(ty: Type) ?u64 {
     return switch (ty.specifier) {
         .array, .static_array, .decayed_array, .decayed_static_array => ty.data.array.len,
         .typeof_type, .decayed_typeof_type => ty.data.sub_type.arrayLen(),
@@ -667,6 +717,7 @@ pub fn getCharSignedness(comp: *const Compilation) std.builtin.Signedness {
         .s390x,
         .xcore,
         .arc,
+        .msp430,
         => return .unsigned,
         else => return .signed,
     }
@@ -716,30 +767,23 @@ pub fn sizeCompare(a: Type, b: Type, comp: *Compilation) TypeSizeOrder {
 pub fn sizeof(ty: Type, comp: *const Compilation) ?u64 {
     // TODO get target from compilation
     return switch (ty.specifier) {
-        .variable_len_array, .unspecified_variable_len_array, .incomplete_array => return null,
+        .variable_len_array, .unspecified_variable_len_array => return null,
+        .incomplete_array => return if (comp.langopts.emulate == .msvc) @as(?u64, 0) else null,
         .func, .var_args_func, .old_style_func, .void, .bool => 1,
         .char, .schar, .uchar => 1,
-        .short, .ushort => 2,
-        .int, .uint => 4,
-        .long, .ulong => switch (comp.target.os.tag) {
-            .linux,
-            .macos,
-            .freebsd,
-            .netbsd,
-            .dragonfly,
-            .openbsd,
-            .wasi,
-            .emscripten,
-            => comp.target.cpu.arch.ptrBitWidth() >> 3,
-            .windows, .uefi => 4,
-            else => 4,
-        },
-        .long_long, .ulong_long => 8,
+        .short => @divExact(CType.sizeInBits(.short, comp.target), 8),
+        .ushort => @divExact(CType.sizeInBits(.ushort, comp.target), 8),
+        .int => @divExact(CType.sizeInBits(.int, comp.target), 8),
+        .uint => @divExact(CType.sizeInBits(.uint, comp.target), 8),
+        .long => @divExact(CType.sizeInBits(.long, comp.target), 8),
+        .ulong => @divExact(CType.sizeInBits(.ulong, comp.target), 8),
+        .long_long => @divExact(CType.sizeInBits(.longlong, comp.target), 8),
+        .ulong_long => @divExact(CType.sizeInBits(.ulonglong, comp.target), 8),
+        .long_double => @divExact(CType.sizeInBits(.longdouble, comp.target), 8),
         .int128, .uint128 => 16,
         .fp16 => 2,
         .float => 4,
         .double => 8,
-        .long_double => 16,
         .float80 => 16,
         .float128 => 16,
         // zig fmt: off
@@ -761,9 +805,18 @@ pub fn sizeof(ty: Type, comp: *const Compilation) ?u64 {
         => comp.target.cpu.arch.ptrBitWidth() >> 3,
         .array, .vector => {
             const size = ty.data.array.elem.sizeof(comp) orelse return null;
-            return std.mem.alignForward(size * ty.data.array.len, ty.alignof(comp));
+            const arr_size = size * ty.data.array.len;
+            if (comp.langopts.emulate == .msvc) {
+                // msvc ignores array type alignment.
+                // Since the size might not be a multiple of the field
+                // alignment, the address of the second element might not be properly aligned
+                // for the field alignment. A flexible array has size 0. See test case 0018.
+                return arr_size;
+            } else {
+                return std.mem.alignForwardGeneric(u64, arr_size, ty.alignof(comp));
+            }
         },
-        .@"struct", .@"union" => if (ty.data.record.isIncomplete()) null else ty.data.record.size,
+        .@"struct", .@"union" => if (ty.data.record.isIncomplete()) null else @as(u64, ty.data.record.type_layout.size_bits / 8),
         .@"enum" => if (ty.data.@"enum".isIncomplete() and !ty.data.@"enum".fixed) null else ty.data.@"enum".tag_ty.sizeof(comp),
         .typeof_type => ty.data.sub_type.sizeof(comp),
         .typeof_expr => ty.data.expr.ty.sizeof(comp),
@@ -772,9 +825,9 @@ pub fn sizeof(ty: Type, comp: *const Compilation) ?u64 {
     };
 }
 
-pub fn bitSizeof(ty: Type, comp: *Compilation) ?u64 {
+pub fn bitSizeof(ty: Type, comp: *const Compilation) ?u64 {
     return switch (ty.specifier) {
-        .bool => 1,
+        .bool => if (comp.langopts.emulate == .msvc) @as(u64, 8) else 1,
         .typeof_type, .decayed_typeof_type => ty.data.sub_type.bitSizeof(comp),
         .typeof_expr, .decayed_typeof_expr => ty.data.expr.ty.bitSizeof(comp),
         .attributed => ty.data.attributed.base.bitSizeof(comp),
@@ -784,7 +837,20 @@ pub fn bitSizeof(ty: Type, comp: *Compilation) ?u64 {
 
 /// Get the alignment of a type
 pub fn alignof(ty: Type, comp: *const Compilation) u29 {
-    if (ty.requestedAlignment(comp)) |requested| return requested;
+
+    // don't return the attribute for records
+    // layout has already accounted for requested alignment
+    if (!ty.isRecord()) {
+        if (ty.requestedAlignment(comp)) |requested| {
+            // gcc does not respect alignment on enums
+            if (ty.get(.@"enum")) |ty_enum| {
+                if (comp.langopts.emulate == .gcc) {
+                    return ty_enum.alignof(comp);
+                }
+            }
+            return requested;
+        }
+    }
 
     // TODO get target from compilation
     return switch (ty.specifier) {
@@ -797,7 +863,10 @@ pub fn alignof(ty: Type, comp: *const Compilation) u29 {
         .func, .var_args_func, .old_style_func => 4, // TODO check target
         .char, .schar, .uchar, .void, .bool, .complex_char, .complex_schar, .complex_uchar => 1,
         .short, .ushort, .complex_short, .complex_ushort => 2,
-        .int, .uint, .complex_int, .complex_uint => 4,
+        .int, .uint, .complex_int, .complex_uint => switch (comp.target.cpu.arch) {
+            .msp430 => @as(u29, 2),
+            else => 4,
+        },
         .long, .ulong, .complex_long, .complex_ulong => switch (comp.target.os.tag) {
             .linux,
             .macos,
@@ -809,15 +878,36 @@ pub fn alignof(ty: Type, comp: *const Compilation) u29 {
             .emscripten,
             => comp.target.cpu.arch.ptrBitWidth() >> 3,
             .windows, .uefi => 4,
-            else => 4,
+            else => if (comp.target.cpu.arch == .msp430) @as(u29, 2) else 4,
         },
 
-        .long_long, .ulong_long, .complex_long_long, .complex_ulong_long => 8,
+        .long_long, .ulong_long, .complex_long_long, .complex_ulong_long => switch (comp.target.cpu.arch) {
+            .msp430 => 2,
+            .i386 => switch (comp.target.os.tag) {
+                .windows, .uefi => 8,
+                else => 4,
+            },
+            else => 8,
+        },
         .int128, .uint128, .complex_int128, .complex_uint128 => 16,
         .fp16, .complex_fp16 => 2,
-        .float, .complex_float => 4,
-        .double, .complex_double => 8,
-        .long_double, .complex_long_double => 16,
+        .float, .complex_float => if (comp.target.cpu.arch == .msp430) @as(u29, 2) else 4,
+        .double, .complex_double => switch (comp.target.cpu.arch) {
+            .msp430 => 2,
+            .i386 => switch (comp.target.os.tag) {
+                .windows, .uefi => 8,
+                else => 4,
+            },
+            else => 8,
+        },
+        .long_double, .complex_long_double => switch (comp.target.cpu.arch) {
+            .msp430 => 2,
+            .i386 => switch (comp.target.os.tag) {
+                .windows, .uefi => 8,
+                else => 4,
+            },
+            else => 16,
+        },
         .float80, .complex_float80, .float128, .complex_float128 => 16,
         .pointer,
         .decayed_array,
@@ -827,7 +917,7 @@ pub fn alignof(ty: Type, comp: *const Compilation) u29 {
         .decayed_unspecified_variable_len_array,
         .static_array,
         => comp.target.cpu.arch.ptrBitWidth() >> 3,
-        .@"struct", .@"union" => if (ty.data.record.isIncomplete()) 0 else ty.data.record.alignment,
+        .@"struct", .@"union" => if (ty.data.record.isIncomplete()) 0 else @intCast(u29, ty.data.record.type_layout.field_alignment_bits / 8),
         .@"enum" => if (ty.data.@"enum".isIncomplete() and !ty.data.@"enum".fixed) 0 else ty.data.@"enum".tag_ty.alignof(comp),
         .typeof_type, .decayed_typeof_type => ty.data.sub_type.alignof(comp),
         .typeof_expr, .decayed_typeof_expr => ty.data.expr.ty.alignof(comp),
@@ -881,27 +971,27 @@ pub fn get(ty: *const Type, specifier: Specifier) ?*const Type {
     };
 }
 
-fn requestedAlignment(ty: Type, comp: *const Compilation) ?u29 {
+pub fn requestedAlignment(ty: Type, comp: *const Compilation) ?u29 {
     return switch (ty.specifier) {
         .typeof_type, .decayed_typeof_type => ty.data.sub_type.requestedAlignment(comp),
         .typeof_expr, .decayed_typeof_expr => ty.data.expr.ty.requestedAlignment(comp),
-        .attributed => {
-            var max_requested: ?u29 = null;
-            for (ty.data.attributed.attributes) |attribute| {
-                if (attribute.tag != .aligned) continue;
-                const requested = if (attribute.args.aligned.alignment) |alignment|
-                    alignment.requested
-                else
-                    comp.defaultAlignment();
-
-                if (max_requested == null or max_requested.? < requested) {
-                    max_requested = requested;
-                }
-            }
-            return max_requested;
-        },
+        .attributed => annotationAlignment(comp, ty.data.attributed.attributes),
         else => null,
     };
+}
+
+pub fn annotationAlignment(comp: *const Compilation, attrs: ?[]const Attribute) ?u29 {
+    const a = attrs orelse return null;
+
+    var max_requested: ?u29 = null;
+    for (a) |attribute| {
+        if (attribute.tag != .aligned) continue;
+        const requested = if (attribute.args.aligned.alignment) |alignment| alignment.requested else comp.defaultAlignment();
+        if (max_requested == null or max_requested.? < requested) {
+            max_requested = requested;
+        }
+    }
+    return max_requested;
 }
 
 pub fn eql(a_param: Type, b_param: Type, comp: *const Compilation, check_qualifiers: bool) bool {

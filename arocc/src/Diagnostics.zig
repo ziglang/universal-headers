@@ -47,6 +47,7 @@ pub const Message = struct {
             specifier: enum { @"struct", @"union", @"enum" },
         },
         actual_codepoint: u21,
+        ascii: u7,
         unsigned: u64,
         pow_2_as_string: u8,
         signed: i64,
@@ -143,6 +144,9 @@ pub const Options = packed struct {
     @"invalid-noreturn": Kind = .default,
     @"zero-length-array": Kind = .default,
     @"old-style-flexible-struct": Kind = .default,
+    @"gnu-zero-variadic-macro-arguments": Kind = .default,
+    @"main-return-type": Kind = .default,
+    @"expansion-to-defined": Kind = .default,
 };
 
 const messages = struct {
@@ -645,6 +649,10 @@ const messages = struct {
     };
     const addr_of_rvalue = struct {
         const msg = "cannot take the address of an rvalue";
+        const kind = .@"error";
+    };
+    const addr_of_bitfield = struct {
+        const msg = "address of bit-field requested";
         const kind = .@"error";
     };
     const not_assignable = struct {
@@ -1533,6 +1541,7 @@ const messages = struct {
     const flexible_in_empty = struct {
         const msg = "flexible array member in otherwise empty struct";
         const kind = .@"error";
+        const suppress_msvc = true;
     };
     const duplicate_member = struct {
         const msg = "duplicate member '{s}'";
@@ -1997,6 +2006,58 @@ const messages = struct {
         const pedantic = true;
         const opt = "old-style-flexible-struct";
     };
+    const comma_deletion_va_args = struct {
+        const msg = "token pasting of ',' and __VA_ARGS__ is a GNU extension";
+        const kind = .off;
+        const pedantic = true;
+        const opt = "gnu-zero-variadic-macro-arguments";
+        const suppress_gcc = true;
+    };
+    const main_return_type = struct {
+        const msg = "return type of 'main' is not 'int'";
+        const kind = .warning;
+        const opt = "main-return-type";
+    };
+    const expansion_to_defined = struct {
+        const msg = "macro expansion producing 'defined' has undefined behavior";
+        const kind = .off;
+        const pedantic = true;
+        const opt = "expansion-to-defined";
+    };
+    const invalid_int_suffix = struct {
+        const msg = "invalid suffix '{s}' on integer constant";
+        const extra = .str;
+        const kind = .@"error";
+    };
+    const invalid_float_suffix = struct {
+        const msg = "invalid suffix '{s}' on floating constant";
+        const extra = .str;
+        const kind = .@"error";
+    };
+    const invalid_octal_digit = struct {
+        const msg = "invalid digit '{c}' in octal constant";
+        const extra = .ascii;
+        const kind = .@"error";
+    };
+    const invalid_binary_digit = struct {
+        const msg = "invalid digit '{c}' in binary constant";
+        const extra = .ascii;
+        const kind = .@"error";
+    };
+    const exponent_has_no_digits = struct {
+        const msg = "exponent has no digits";
+        const kind = .@"error";
+    };
+    const hex_floating_constant_requires_exponent = struct {
+        const msg = "hexadecimal floating constant requires an exponent";
+        const kind = .@"error";
+    };
+    const sizeof_returns_zero = struct {
+        const msg = "sizeof returns 0";
+        const kind = .warning;
+        const suppress_gcc = true;
+        const suppress_clang = true;
+    };
 };
 
 list: std.ArrayListUnmanaged(Message) = .{},
@@ -2125,10 +2186,12 @@ pub fn fatalNoSrc(diag: *Diagnostics, comptime fmt: []const u8, args: anytype) e
 
 pub fn render(comp: *Compilation) void {
     if (comp.diag.list.items.len == 0) return;
-    var m = MsgWriter.init(comp.diag.color);
+    var m = defaultMsgWriter(comp);
     defer m.deinit();
-
-    renderExtra(comp, &m);
+    renderMessages(comp, &m);
+}
+pub fn defaultMsgWriter(comp: *const Compilation) MsgWriter {
+    return MsgWriter.init(comp.diag.color);
 }
 
 /// This is a workaround for a stage1 bug when constructing an anonymous struct with a
@@ -2138,7 +2201,7 @@ const Pow2String = struct {
     @"0": []const u8,
 };
 
-pub fn renderExtra(comp: *Compilation, m: anytype) void {
+pub fn renderMessages(comp: *Compilation, m: anytype) void {
     var errors: u32 = 0;
     var warnings: u32 = 0;
     for (comp.diag.list.items) |msg| {
@@ -2149,93 +2212,7 @@ pub fn renderExtra(comp: *Compilation, m: anytype) void {
             .off => continue, // happens if an error is added before it is disabled
             .default => unreachable,
         }
-
-        var line: ?[]const u8 = null;
-        var end_with_splice = false;
-        const width = if (msg.loc.id != .unused) blk: {
-            var loc = msg.loc;
-            switch (msg.tag) {
-                .escape_sequence_overflow,
-                .invalid_universal_character,
-                .non_standard_escape_char,
-                // use msg.extra.unsigned for index into string literal
-                => loc.byte_offset += @truncate(u32, msg.extra.unsigned),
-                else => {},
-            }
-            const source = comp.getSource(loc.id);
-            var line_col = source.lineCol(loc);
-            line = line_col.line;
-            end_with_splice = line_col.end_with_splice;
-            if (msg.tag == .backslash_newline_escape) {
-                line = line_col.line[0 .. line_col.col - 1];
-                line_col.col += 1;
-                line_col.width += 1;
-            }
-            m.location(source.path, line_col.line_no, line_col.col);
-            break :blk line_col.width;
-        } else 0;
-
-        m.start(msg.kind);
-        @setEvalBranchQuota(1500);
-        inline for (std.meta.fields(Tag)) |field| {
-            if (field.value == @enumToInt(msg.tag)) {
-                const info = @field(messages, field.name);
-                if (@hasDecl(info, "extra")) {
-                    switch (info.extra) {
-                        .str => m.print(info.msg, .{msg.extra.str}),
-                        .tok_id => m.print(info.msg, .{
-                            msg.extra.tok_id.expected.symbol(),
-                            msg.extra.tok_id.actual.symbol(),
-                        }),
-                        .tok_id_expected => m.print(info.msg, .{msg.extra.tok_id_expected.symbol()}),
-                        .arguments => m.print(info.msg, .{ msg.extra.arguments.expected, msg.extra.arguments.actual }),
-                        .codepoints => m.print(info.msg, .{
-                            msg.extra.codepoints.actual,
-                            msg.extra.codepoints.resembles,
-                        }),
-                        .attr_arg_count => m.print(info.msg, .{
-                            @tagName(msg.extra.attr_arg_count.attribute),
-                            msg.extra.attr_arg_count.expected,
-                        }),
-                        .attr_arg_type => m.print(info.msg, .{
-                            msg.extra.attr_arg_type.expected.toString(),
-                            msg.extra.attr_arg_type.actual.toString(),
-                        }),
-                        .actual_codepoint => m.print(info.msg, .{msg.extra.actual_codepoint}),
-                        .unsigned => m.print(info.msg, .{msg.extra.unsigned}),
-                        .pow_2_as_string => m.print(info.msg, Pow2String{ .@"0" = switch (msg.extra.pow_2_as_string) {
-                            63 => "9223372036854775808",
-                            64 => "18446744073709551616",
-                            127 => "170141183460469231731687303715884105728",
-                            128 => "340282366920938463463374607431768211456",
-                            else => unreachable,
-                        } }),
-                        .signed => m.print(info.msg, .{msg.extra.signed}),
-                        .attr_enum => m.print(info.msg, .{
-                            @tagName(msg.extra.attr_enum.tag),
-                            Attribute.Formatting.choices(msg.extra.attr_enum.tag),
-                        }),
-                        .ignored_record_attr => m.print(info.msg, .{
-                            @tagName(msg.extra.ignored_record_attr.tag),
-                            @tagName(msg.extra.ignored_record_attr.specifier),
-                        }),
-                        else => @compileError("invalid extra kind " ++ @tagName(info.extra)),
-                    }
-                } else {
-                    m.write(info.msg);
-                }
-
-                if (@hasDecl(info, "opt")) {
-                    if (msg.kind == .@"error" and info.kind != .@"error") {
-                        m.print(" [-Werror,-W{s}]", .{info.opt});
-                    } else if (msg.kind != .note) {
-                        m.print(" [-W{s}]", .{info.opt});
-                    }
-                }
-            }
-        }
-
-        m.end(line, width, end_with_splice);
+        renderMessage(comp, m, msg);
     }
     const w_s: []const u8 = if (warnings == 1) "" else "s";
     const e_s: []const u8 = if (errors == 1) "" else "s";
@@ -2251,14 +2228,104 @@ pub fn renderExtra(comp: *Compilation, m: anytype) void {
     comp.diag.errors += errors;
 }
 
+pub fn renderMessage(comp: *Compilation, m: anytype, msg: Message) void {
+    var line: ?[]const u8 = null;
+    var end_with_splice = false;
+    const width = if (msg.loc.id != .unused) blk: {
+        var loc = msg.loc;
+        switch (msg.tag) {
+            .escape_sequence_overflow,
+            .invalid_universal_character,
+            .non_standard_escape_char,
+            // use msg.extra.unsigned for index into string literal
+            => loc.byte_offset += @truncate(u32, msg.extra.unsigned),
+            else => {},
+        }
+        const source = comp.getSource(loc.id);
+        var line_col = source.lineCol(loc);
+        line = line_col.line;
+        end_with_splice = line_col.end_with_splice;
+        if (msg.tag == .backslash_newline_escape) {
+            line = line_col.line[0 .. line_col.col - 1];
+            line_col.col += 1;
+            line_col.width += 1;
+        }
+        m.location(source.path, line_col.line_no, line_col.col);
+        break :blk line_col.width;
+    } else 0;
+
+    m.start(msg.kind);
+    @setEvalBranchQuota(1500);
+    switch (msg.tag) {
+        inline else => |tag| {
+            const info = @field(messages, @tagName(tag));
+            if (@hasDecl(info, "extra")) {
+                switch (info.extra) {
+                    .str => m.print(info.msg, .{msg.extra.str}),
+                    .tok_id => m.print(info.msg, .{
+                        msg.extra.tok_id.expected.symbol(),
+                        msg.extra.tok_id.actual.symbol(),
+                    }),
+                    .tok_id_expected => m.print(info.msg, .{msg.extra.tok_id_expected.symbol()}),
+                    .arguments => m.print(info.msg, .{ msg.extra.arguments.expected, msg.extra.arguments.actual }),
+                    .codepoints => m.print(info.msg, .{
+                        msg.extra.codepoints.actual,
+                        msg.extra.codepoints.resembles,
+                    }),
+                    .attr_arg_count => m.print(info.msg, .{
+                        @tagName(msg.extra.attr_arg_count.attribute),
+                        msg.extra.attr_arg_count.expected,
+                    }),
+                    .attr_arg_type => m.print(info.msg, .{
+                        msg.extra.attr_arg_type.expected.toString(),
+                        msg.extra.attr_arg_type.actual.toString(),
+                    }),
+                    .actual_codepoint => m.print(info.msg, .{msg.extra.actual_codepoint}),
+                    .ascii => m.print(info.msg, .{msg.extra.ascii}),
+                    .unsigned => m.print(info.msg, .{msg.extra.unsigned}),
+                    .pow_2_as_string => m.print(info.msg, Pow2String{ .@"0" = switch (msg.extra.pow_2_as_string) {
+                        63 => "9223372036854775808",
+                        64 => "18446744073709551616",
+                        127 => "170141183460469231731687303715884105728",
+                        128 => "340282366920938463463374607431768211456",
+                        else => unreachable,
+                    } }),
+                    .signed => m.print(info.msg, .{msg.extra.signed}),
+                    .attr_enum => m.print(info.msg, .{
+                        @tagName(msg.extra.attr_enum.tag),
+                        Attribute.Formatting.choices(msg.extra.attr_enum.tag),
+                    }),
+                    .ignored_record_attr => m.print(info.msg, .{
+                        @tagName(msg.extra.ignored_record_attr.tag),
+                        @tagName(msg.extra.ignored_record_attr.specifier),
+                    }),
+                    else => @compileError("invalid extra kind " ++ @tagName(info.extra)),
+                }
+            } else {
+                m.write(info.msg);
+            }
+
+            if (@hasDecl(info, "opt")) {
+                if (msg.kind == .@"error" and info.kind != .@"error") {
+                    m.print(" [-Werror,-W{s}]", .{info.opt});
+                } else if (msg.kind != .note) {
+                    m.print(" [-W{s}]", .{info.opt});
+                }
+            }
+        },
+    }
+
+    m.end(line, width, end_with_splice);
+}
+
 fn tagKind(diag: *Diagnostics, tag: Tag) Kind {
     // XXX: horrible hack, do not do this
     const comp = @fieldParentPtr(Compilation, "diag", diag);
 
     var kind: Kind = undefined;
-    inline for (std.meta.fields(Tag)) |field| {
-        if (field.value == @enumToInt(tag)) {
-            const info = @field(messages, field.name);
+    switch (tag) {
+        inline else => |tag_val| {
+            const info = @field(messages, @tagName(tag_val));
             kind = info.kind;
 
             // stage1 doesn't like when I combine these ifs
@@ -2277,11 +2344,13 @@ fn tagKind(diag: *Diagnostics, tag: Tag) Kind {
             if (@hasDecl(info, "suppress_version")) if (comp.langopts.standard.atLeast(info.suppress_version)) return .off;
             if (@hasDecl(info, "suppress_gnu")) if (comp.langopts.standard.isExplicitGNU()) return .off;
             if (@hasDecl(info, "suppress_language_option")) if (!@field(comp.langopts, info.suppress_language_option)) return .off;
+            if (@hasDecl(info, "suppress_gcc")) if (comp.langopts.emulate == .gcc) return .off;
+            if (@hasDecl(info, "suppress_clang")) if (comp.langopts.emulate == .clang) return .off;
+            if (@hasDecl(info, "suppress_msvc")) if (comp.langopts.emulate == .msvc) return .off;
             if (kind == .@"error" and diag.fatal_errors) kind = .@"fatal error";
             return kind;
-        }
+        },
     }
-    unreachable;
 }
 
 const MsgWriter = struct {
@@ -2296,12 +2365,12 @@ const MsgWriter = struct {
         };
     }
 
-    fn deinit(m: *MsgWriter) void {
+    pub fn deinit(m: *MsgWriter) void {
         m.w.flush() catch {};
         std.debug.getStderrMutex().unlock();
     }
 
-    fn print(m: *MsgWriter, comptime fmt: []const u8, args: anytype) void {
+    pub fn print(m: *MsgWriter, comptime fmt: []const u8, args: anytype) void {
         m.w.writer().print(fmt, args) catch {};
     }
 
