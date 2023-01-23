@@ -1,7 +1,7 @@
 const std = @import("std");
 const LangOpts = @import("LangOpts.zig");
 const Type = @import("Type.zig");
-const CType = @import("zig").CType;
+const CType = Type.CType;
 const TargetSet = @import("builtins/Properties.zig").TargetSet;
 
 pub fn getCharSignedness(target: std.Target) std.builtin.Signedness {

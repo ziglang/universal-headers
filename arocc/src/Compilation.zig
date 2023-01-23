@@ -13,7 +13,7 @@ const Type = @import("Type.zig");
 const Pragma = @import("Pragma.zig");
 const StringInterner = @import("StringInterner.zig");
 const record_layout = @import("record_layout.zig");
-const CType = @import("zig").CType;
+const CType = Type.CType;
 const target = @import("target.zig");
 const BuiltinFunction = @import("builtins/BuiltinFunction.zig");
 
@@ -55,6 +55,7 @@ types: struct {
 /// Mapping from Source.Id to byte offset of first non-utf8 byte
 invalid_utf8_locs: std.AutoHashMapUnmanaged(Source.Id, u32) = .{},
 string_interner: StringInterner = .{},
+skip_standard_macros: bool = false,
 
 pub fn init(gpa: Allocator) Compilation {
     return .{
@@ -132,259 +133,259 @@ fn generateDateAndTime(w: anytype) !void {
 }
 
 /// Generate builtin macros that will be available to each source file.
-pub fn generateBuiltinMacros(comp: *Compilation) !Source {
+pub fn generateBuiltinMacros(comp: *Compilation, buf: *std.ArrayList(u8)) !Source {
     try comp.generateBuiltinTypes();
 
-    var buf = std.ArrayList(u8).init(comp.gpa);
-    defer buf.deinit();
     const w = buf.writer();
 
-    // standard macros
-    try w.writeAll(
-        \\#define __VERSION__ "Aro 
-    ++ @import("lib.zig").version_str ++ "\"\n" ++
-        \\#define __Aro__
-        \\#define __STDC__ 1
-        \\#define __STDC_HOSTED__ 1
-        \\#define __STDC_NO_ATOMICS__ 1
-        \\#define __STDC_NO_COMPLEX__ 1
-        \\#define __STDC_NO_THREADS__ 1
-        \\#define __STDC_NO_VLA__ 1
-        \\
-    );
-    if (comp.langopts.standard.StdCVersionMacro()) |stdc_version| {
-        try w.print("#define __STDC_VERSION__ {s}\n", .{stdc_version});
-    }
-
-    // os macros
-    switch (comp.target.os.tag) {
-        .linux => try w.writeAll(
-            \\#define linux 1
-            \\#define __linux 1
-            \\#define __linux__ 1
+    if (!comp.skip_standard_macros) {
+        // standard macros
+        try w.writeAll(
+            \\#define __VERSION__ "Aro 
+        ++ @import("lib.zig").version_str ++ "\"\n" ++
+            \\#define __Aro__
+            \\#define __STDC__ 1
+            \\#define __STDC_HOSTED__ 1
+            \\#define __STDC_NO_ATOMICS__ 1
+            \\#define __STDC_NO_COMPLEX__ 1
+            \\#define __STDC_NO_THREADS__ 1
+            \\#define __STDC_NO_VLA__ 1
             \\
-        ),
-        .windows => if (CType.ptrBitWidth(comp.target) == 32) try w.writeAll(
-            \\#define WIN32 1
-            \\#define _WIN32 1
-            \\#define __WIN32 1
-            \\#define __WIN32__ 1
+        );
+        if (comp.langopts.standard.StdCVersionMacro()) |stdc_version| {
+            try w.print("#define __STDC_VERSION__ {s}\n", .{stdc_version});
+        }
+
+        // os macros
+        switch (comp.target.os.tag) {
+            .linux => try w.writeAll(
+                \\#define linux 1
+                \\#define __linux 1
+                \\#define __linux__ 1
+                \\
+            ),
+            .windows => if (CType.ptrBitWidth(comp.target) == 32) try w.writeAll(
+                \\#define WIN32 1
+                \\#define _WIN32 1
+                \\#define __WIN32 1
+                \\#define __WIN32__ 1
+                \\
+            ) else try w.writeAll(
+                \\#define WIN32 1
+                \\#define WIN64 1
+                \\#define _WIN32 1
+                \\#define _WIN64 1
+                \\#define __WIN32 1
+                \\#define __WIN64 1
+                \\#define __WIN32__ 1
+                \\#define __WIN64__ 1
+                \\
+            ),
+            .freebsd => try w.print("#define __FreeBSD__ {d}\n", .{comp.target.os.version_range.semver.min.major}),
+            .netbsd => try w.writeAll("#define __NetBSD__ 1\n"),
+            .openbsd => try w.writeAll("#define __OpenBSD__ 1\n"),
+            .dragonfly => try w.writeAll("#define __DragonFly__ 1\n"),
+            .solaris => try w.writeAll(
+                \\#define sun 1
+                \\#define __sun 1
+                \\
+            ),
+            .macos => try w.writeAll(
+                \\#define __APPLE__ 1
+                \\#define __MACH__ 1
+                \\
+            ),
+            else => {},
+        }
+
+        // unix and other additional os macros
+        switch (comp.target.os.tag) {
+            .freebsd,
+            .netbsd,
+            .openbsd,
+            .dragonfly,
+            .linux,
+            => try w.writeAll(
+                \\#define unix 1
+                \\#define __unix 1
+                \\#define __unix__ 1
+                \\
+            ),
+            else => {},
+        }
+        if (comp.target.abi == .android) {
+            try w.writeAll("#define __ANDROID__ 1\n");
+        }
+
+        // architecture macros
+        switch (comp.target.cpu.arch) {
+            .x86_64 => try w.writeAll(
+                \\#define __amd64__ 1
+                \\#define __amd64 1
+                \\#define __x86_64 1
+                \\#define __x86_64__ 1
+                \\
+            ),
+            .x86 => try w.writeAll(
+                \\#define i386 1
+                \\#define __i386 1
+                \\#define __i386__ 1
+                \\
+            ),
+            .mips,
+            .mipsel,
+            .mips64,
+            .mips64el,
+            => try w.writeAll(
+                \\#define __mips__ 1
+                \\#define mips 1
+                \\
+            ),
+            .powerpc,
+            .powerpcle,
+            => try w.writeAll(
+                \\#define __powerpc__ 1
+                \\#define __POWERPC__ 1
+                \\#define __ppc__ 1
+                \\#define __PPC__ 1
+                \\#define _ARCH_PPC 1
+                \\
+            ),
+            .powerpc64,
+            .powerpc64le,
+            => try w.writeAll(
+                \\#define __powerpc 1
+                \\#define __powerpc__ 1
+                \\#define __powerpc64__ 1
+                \\#define __POWERPC__ 1
+                \\#define __ppc__ 1
+                \\#define __ppc64__ 1
+                \\#define __PPC__ 1
+                \\#define __PPC64__ 1
+                \\#define _ARCH_PPC 1
+                \\#define _ARCH_PPC64 1
+                \\
+            ),
+            .sparc64 => try w.writeAll(
+                \\#define __sparc__ 1
+                \\#define __sparc 1
+                \\#define __sparc_v9__ 1
+                \\
+            ),
+            .sparc, .sparcel => try w.writeAll(
+                \\#define __sparc__ 1
+                \\#define __sparc 1
+                \\
+            ),
+            .arm, .armeb => try w.writeAll(
+                \\#define __arm__ 1
+                \\#define __arm 1
+                \\
+            ),
+            .thumb, .thumbeb => try w.writeAll(
+                \\#define __arm__ 1
+                \\#define __arm 1
+                \\#define __thumb__ 1
+                \\
+            ),
+            .aarch64, .aarch64_be => try w.writeAll("#define __aarch64__ 1\n"),
+            .msp430 => try w.writeAll(
+                \\#define MSP430 1
+                \\#define __MSP430__ 1
+                \\
+            ),
+            else => {},
+        }
+
+        if (comp.target.os.tag != .windows) switch (CType.ptrBitWidth(comp.target)) {
+            64 => try w.writeAll(
+                \\#define _LP64 1
+                \\#define __LP64__ 1
+                \\
+            ),
+            32 => try w.writeAll("#define _ILP32 1\n"),
+            else => {},
+        };
+
+        try w.writeAll(
+            \\#define __ORDER_LITTLE_ENDIAN__ 1234
+            \\#define __ORDER_BIG_ENDIAN__ 4321
+            \\#define __ORDER_PDP_ENDIAN__ 3412
+            \\
+        );
+        if (comp.target.cpu.arch.endian() == .Little) try w.writeAll(
+            \\#define __BYTE_ORDER__ __ORDER_LITTLE_ENDIAN__
+            \\#define __LITTLE_ENDIAN__ 1
             \\
         ) else try w.writeAll(
-            \\#define WIN32 1
-            \\#define WIN64 1
-            \\#define _WIN32 1
-            \\#define _WIN64 1
-            \\#define __WIN32 1
-            \\#define __WIN64 1
-            \\#define __WIN32__ 1
-            \\#define __WIN64__ 1
+            \\#define __BYTE_ORDER__ __ORDER_BIG_ENDIAN__
+            \\#define __BIG_ENDIAN__ 1
             \\
-        ),
-        .freebsd => try w.print("#define __FreeBSD__ {d}\n", .{comp.target.os.version_range.semver.min.major}),
-        .netbsd => try w.writeAll("#define __NetBSD__ 1\n"),
-        .openbsd => try w.writeAll("#define __OpenBSD__ 1\n"),
-        .dragonfly => try w.writeAll("#define __DragonFly__ 1\n"),
-        .solaris => try w.writeAll(
-            \\#define sun 1
-            \\#define __sun 1
+        );
+
+        // timestamps
+        try generateDateAndTime(w);
+
+        // types
+        if (target.getCharSignedness(comp.target) == .unsigned) try w.writeAll("#define __CHAR_UNSIGNED__ 1\n");
+        try w.writeAll("#define __CHAR_BIT__ 8\n");
+
+        // int maxs
+        try comp.generateIntMax(w, "__SCHAR_MAX__", .{ .specifier = .schar });
+        try comp.generateIntMax(w, "__SHRT_MAX__", .{ .specifier = .short });
+        try comp.generateIntMax(w, "__INT_MAX__", .{ .specifier = .int });
+        try comp.generateIntMax(w, "__LONG_MAX__", .{ .specifier = .long });
+        try comp.generateIntMax(w, "__LONG_LONG_MAX__", .{ .specifier = .long_long });
+        try comp.generateIntMax(w, "__WCHAR_MAX__", comp.types.wchar);
+        // try comp.generateIntMax(w, "__WINT_MAX__", comp.types.wchar);
+        // try comp.generateIntMax(w, "__INTMAX_MAX__", comp.types.wchar);
+        try comp.generateIntMax(w, "__SIZE_MAX__", comp.types.size);
+        // try comp.generateIntMax(w, "__UINTMAX_MAX__", comp.types.wchar);
+        try comp.generateIntMax(w, "__PTRDIFF_MAX__", comp.types.ptrdiff);
+        // try comp.generateIntMax(w, "__INTPTR_MAX__", comp.types.wchar);
+        // try comp.generateIntMax(w, "__UINTPTR_MAX__", comp.types.size);
+
+        // int widths
+        try w.writeAll("#define __BITINT_MAXWIDTH__ 128\n");
+
+        // sizeof types
+        try comp.generateSizeofType(w, "__SIZEOF_FLOAT__", .{ .specifier = .float });
+        try comp.generateSizeofType(w, "__SIZEOF_DOUBLE__", .{ .specifier = .double });
+        try comp.generateSizeofType(w, "__SIZEOF_LONG_DOUBLE__", .{ .specifier = .long_double });
+        try comp.generateSizeofType(w, "__SIZEOF_SHORT__", .{ .specifier = .short });
+        try comp.generateSizeofType(w, "__SIZEOF_INT__", .{ .specifier = .int });
+        try comp.generateSizeofType(w, "__SIZEOF_LONG__", .{ .specifier = .long });
+        try comp.generateSizeofType(w, "__SIZEOF_LONG_LONG__", .{ .specifier = .long_long });
+        try comp.generateSizeofType(w, "__SIZEOF_POINTER__", .{ .specifier = .pointer });
+        try comp.generateSizeofType(w, "__SIZEOF_PTRDIFF_T__", comp.types.ptrdiff);
+        try comp.generateSizeofType(w, "__SIZEOF_SIZE_T__", comp.types.size);
+        try comp.generateSizeofType(w, "__SIZEOF_WCHAR_T__", comp.types.wchar);
+        // try comp.generateSizeofType(w, "__SIZEOF_WINT_T__", .{ .specifier = .pointer });
+
+        // various int types
+        const mapper = comp.string_interner.getSlowTypeMapper();
+        try generateTypeMacro(w, mapper, "__PTRDIFF_TYPE__", comp.types.ptrdiff, comp.langopts);
+        try generateTypeMacro(w, mapper, "__SIZE_TYPE__", comp.types.size, comp.langopts);
+        try generateTypeMacro(w, mapper, "__WCHAR_TYPE__", comp.types.wchar, comp.langopts);
+
+        if (target.FPSemantics.halfPrecisionType(comp.target)) |half| {
+            try generateFloatMacros(w, "FLT16", half, "F16");
+        }
+        try generateFloatMacros(w, "FLT", target.FPSemantics.forType(CType.float, comp.target), "F");
+        try generateFloatMacros(w, "DBL", target.FPSemantics.forType(CType.double, comp.target), "");
+        try generateFloatMacros(w, "LDBL", target.FPSemantics.forType(CType.longdouble, comp.target), "L");
+
+        // TODO: clang treats __FLT_EVAL_METHOD__ as a special-cased macro because evaluating it within a scope
+        // where `#pragma clang fp eval_method(X)` has been called produces an error diagnostic.
+        const flt_eval_method = comp.langopts.fp_eval_method orelse target.defaultFpEvalMethod(comp.target);
+        try w.print("#define __FLT_EVAL_METHOD__ {d}\n", .{@enumToInt(flt_eval_method)});
+
+        try w.writeAll(
+            \\#define __FLT_RADIX__ 2
+            \\#define __DECIMAL_DIG__ __LDBL_DECIMAL_DIG__
             \\
-        ),
-        .macos => try w.writeAll(
-            \\#define __APPLE__ 1
-            \\#define __MACH__ 1
-            \\
-        ),
-        else => {},
+        );
     }
-
-    // unix and other additional os macros
-    switch (comp.target.os.tag) {
-        .freebsd,
-        .netbsd,
-        .openbsd,
-        .dragonfly,
-        .linux,
-        => try w.writeAll(
-            \\#define unix 1
-            \\#define __unix 1
-            \\#define __unix__ 1
-            \\
-        ),
-        else => {},
-    }
-    if (comp.target.abi == .android) {
-        try w.writeAll("#define __ANDROID__ 1\n");
-    }
-
-    // architecture macros
-    switch (comp.target.cpu.arch) {
-        .x86_64 => try w.writeAll(
-            \\#define __amd64__ 1
-            \\#define __amd64 1
-            \\#define __x86_64 1
-            \\#define __x86_64__ 1
-            \\
-        ),
-        .x86 => try w.writeAll(
-            \\#define i386 1
-            \\#define __i386 1
-            \\#define __i386__ 1
-            \\
-        ),
-        .mips,
-        .mipsel,
-        .mips64,
-        .mips64el,
-        => try w.writeAll(
-            \\#define __mips__ 1
-            \\#define mips 1
-            \\
-        ),
-        .powerpc,
-        .powerpcle,
-        => try w.writeAll(
-            \\#define __powerpc__ 1
-            \\#define __POWERPC__ 1
-            \\#define __ppc__ 1
-            \\#define __PPC__ 1
-            \\#define _ARCH_PPC 1
-            \\
-        ),
-        .powerpc64,
-        .powerpc64le,
-        => try w.writeAll(
-            \\#define __powerpc 1
-            \\#define __powerpc__ 1
-            \\#define __powerpc64__ 1
-            \\#define __POWERPC__ 1
-            \\#define __ppc__ 1
-            \\#define __ppc64__ 1
-            \\#define __PPC__ 1
-            \\#define __PPC64__ 1
-            \\#define _ARCH_PPC 1
-            \\#define _ARCH_PPC64 1
-            \\
-        ),
-        .sparc64 => try w.writeAll(
-            \\#define __sparc__ 1
-            \\#define __sparc 1
-            \\#define __sparc_v9__ 1
-            \\
-        ),
-        .sparc, .sparcel => try w.writeAll(
-            \\#define __sparc__ 1
-            \\#define __sparc 1
-            \\
-        ),
-        .arm, .armeb => try w.writeAll(
-            \\#define __arm__ 1
-            \\#define __arm 1
-            \\
-        ),
-        .thumb, .thumbeb => try w.writeAll(
-            \\#define __arm__ 1
-            \\#define __arm 1
-            \\#define __thumb__ 1
-            \\
-        ),
-        .aarch64, .aarch64_be => try w.writeAll("#define __aarch64__ 1\n"),
-        .msp430 => try w.writeAll(
-            \\#define MSP430 1
-            \\#define __MSP430__ 1
-            \\
-        ),
-        else => {},
-    }
-
-    if (comp.target.os.tag != .windows) switch (CType.ptrBitWidth(comp.target)) {
-        64 => try w.writeAll(
-            \\#define _LP64 1
-            \\#define __LP64__ 1
-            \\
-        ),
-        32 => try w.writeAll("#define _ILP32 1\n"),
-        else => {},
-    };
-
-    try w.writeAll(
-        \\#define __ORDER_LITTLE_ENDIAN__ 1234
-        \\#define __ORDER_BIG_ENDIAN__ 4321
-        \\#define __ORDER_PDP_ENDIAN__ 3412
-        \\
-    );
-    if (comp.target.cpu.arch.endian() == .Little) try w.writeAll(
-        \\#define __BYTE_ORDER__ __ORDER_LITTLE_ENDIAN__
-        \\#define __LITTLE_ENDIAN__ 1
-        \\
-    ) else try w.writeAll(
-        \\#define __BYTE_ORDER__ __ORDER_BIG_ENDIAN__
-        \\#define __BIG_ENDIAN__ 1
-        \\
-    );
-
-    // timestamps
-    try generateDateAndTime(w);
-
-    // types
-    if (target.getCharSignedness(comp.target) == .unsigned) try w.writeAll("#define __CHAR_UNSIGNED__ 1\n");
-    try w.writeAll("#define __CHAR_BIT__ 8\n");
-
-    // int maxs
-    try comp.generateIntMax(w, "__SCHAR_MAX__", .{ .specifier = .schar });
-    try comp.generateIntMax(w, "__SHRT_MAX__", .{ .specifier = .short });
-    try comp.generateIntMax(w, "__INT_MAX__", .{ .specifier = .int });
-    try comp.generateIntMax(w, "__LONG_MAX__", .{ .specifier = .long });
-    try comp.generateIntMax(w, "__LONG_LONG_MAX__", .{ .specifier = .long_long });
-    try comp.generateIntMax(w, "__WCHAR_MAX__", comp.types.wchar);
-    // try comp.generateIntMax(w, "__WINT_MAX__", comp.types.wchar);
-    // try comp.generateIntMax(w, "__INTMAX_MAX__", comp.types.wchar);
-    try comp.generateIntMax(w, "__SIZE_MAX__", comp.types.size);
-    // try comp.generateIntMax(w, "__UINTMAX_MAX__", comp.types.wchar);
-    try comp.generateIntMax(w, "__PTRDIFF_MAX__", comp.types.ptrdiff);
-    // try comp.generateIntMax(w, "__INTPTR_MAX__", comp.types.wchar);
-    // try comp.generateIntMax(w, "__UINTPTR_MAX__", comp.types.size);
-
-    // int widths
-    try w.writeAll("#define __BITINT_MAXWIDTH__ 128\n");
-
-    // sizeof types
-    try comp.generateSizeofType(w, "__SIZEOF_FLOAT__", .{ .specifier = .float });
-    try comp.generateSizeofType(w, "__SIZEOF_DOUBLE__", .{ .specifier = .double });
-    try comp.generateSizeofType(w, "__SIZEOF_LONG_DOUBLE__", .{ .specifier = .long_double });
-    try comp.generateSizeofType(w, "__SIZEOF_SHORT__", .{ .specifier = .short });
-    try comp.generateSizeofType(w, "__SIZEOF_INT__", .{ .specifier = .int });
-    try comp.generateSizeofType(w, "__SIZEOF_LONG__", .{ .specifier = .long });
-    try comp.generateSizeofType(w, "__SIZEOF_LONG_LONG__", .{ .specifier = .long_long });
-    try comp.generateSizeofType(w, "__SIZEOF_POINTER__", .{ .specifier = .pointer });
-    try comp.generateSizeofType(w, "__SIZEOF_PTRDIFF_T__", comp.types.ptrdiff);
-    try comp.generateSizeofType(w, "__SIZEOF_SIZE_T__", comp.types.size);
-    try comp.generateSizeofType(w, "__SIZEOF_WCHAR_T__", comp.types.wchar);
-    // try comp.generateSizeofType(w, "__SIZEOF_WINT_T__", .{ .specifier = .pointer });
-
-    // various int types
-    const mapper = comp.string_interner.getSlowTypeMapper();
-    try generateTypeMacro(w, mapper, "__PTRDIFF_TYPE__", comp.types.ptrdiff, comp.langopts);
-    try generateTypeMacro(w, mapper, "__SIZE_TYPE__", comp.types.size, comp.langopts);
-    try generateTypeMacro(w, mapper, "__WCHAR_TYPE__", comp.types.wchar, comp.langopts);
-
-    if (target.FPSemantics.halfPrecisionType(comp.target)) |half| {
-        try generateFloatMacros(w, "FLT16", half, "F16");
-    }
-    try generateFloatMacros(w, "FLT", target.FPSemantics.forType(CType.float, comp.target), "F");
-    try generateFloatMacros(w, "DBL", target.FPSemantics.forType(CType.double, comp.target), "");
-    try generateFloatMacros(w, "LDBL", target.FPSemantics.forType(CType.longdouble, comp.target), "L");
-
-    // TODO: clang treats __FLT_EVAL_METHOD__ as a special-cased macro because evaluating it within a scope
-    // where `#pragma clang fp eval_method(X)` has been called produces an error diagnostic.
-    const flt_eval_method = comp.langopts.fp_eval_method orelse target.defaultFpEvalMethod(comp.target);
-    try w.print("#define __FLT_EVAL_METHOD__ {d}\n", .{@enumToInt(flt_eval_method)});
-
-    try w.writeAll(
-        \\#define __FLT_RADIX__ 2
-        \\#define __DECIMAL_DIG__ __LDBL_DECIMAL_DIG__
-        \\
-    );
 
     return comp.addSourceFromBuffer("<builtin>", buf.items);
 }
