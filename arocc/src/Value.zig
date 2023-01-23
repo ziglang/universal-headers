@@ -16,6 +16,7 @@ data: union {
 
 const Tag = enum {
     unavailable,
+    nullptr_t,
     /// int is used to store integer, boolean and pointer values
     int,
     float,
@@ -270,6 +271,7 @@ pub fn toBool(v: *Value) void {
 pub fn isZero(v: Value) bool {
     return switch (v.tag) {
         .unavailable => false,
+        .nullptr_t => false,
         .int => v.data.int == 0,
         .float => v.data.float == 0,
         .array => false,
@@ -280,6 +282,7 @@ pub fn isZero(v: Value) bool {
 pub fn getBool(v: Value) bool {
     return switch (v.tag) {
         .unavailable => unreachable,
+        .nullptr_t => false,
         .int => v.data.int != 0,
         .float => v.data.float != 0,
         .array => true,
@@ -304,10 +307,9 @@ const bin_overflow = struct {
     inline fn addInt(comptime T: type, out: *Value, a: Value, b: Value) bool {
         const a_val = a.getInt(T);
         const b_val = b.getInt(T);
-        var c: T = undefined;
-        const overflow = @addWithOverflow(T, a_val, b_val, &c);
-        out.* = int(c);
-        return overflow;
+        const overflow = @addWithOverflow(a_val, b_val);
+        out.* = int(overflow[0]);
+        return overflow[1] != 0;
     }
     inline fn addFloat(comptime T: type, aa: Value, bb: Value) Value {
         const a_val = aa.getFloat(T);
@@ -318,10 +320,9 @@ const bin_overflow = struct {
     inline fn subInt(comptime T: type, out: *Value, a: Value, b: Value) bool {
         const a_val = a.getInt(T);
         const b_val = b.getInt(T);
-        var c: T = undefined;
-        const overflow = @subWithOverflow(T, a_val, b_val, &c);
-        out.* = int(c);
-        return overflow;
+        const overflow = @subWithOverflow(a_val, b_val);
+        out.* = int(overflow[0]);
+        return overflow[1] != 0;
     }
     inline fn subFloat(comptime T: type, aa: Value, bb: Value) Value {
         const a_val = aa.getFloat(T);
@@ -332,10 +333,9 @@ const bin_overflow = struct {
     inline fn mulInt(comptime T: type, out: *Value, a: Value, b: Value) bool {
         const a_val = a.getInt(T);
         const b_val = b.getInt(T);
-        var c: T = undefined;
-        const overflow = @mulWithOverflow(T, a_val, b_val, &c);
-        out.* = int(c);
-        return overflow;
+        const overflow = @mulWithOverflow(a_val, b_val);
+        out.* = int(overflow[0]);
+        return overflow[1] != 0;
     }
     inline fn mulFloat(comptime T: type, aa: Value, bb: Value) Value {
         const a_val = aa.getFloat(T);
@@ -516,6 +516,13 @@ pub fn bitNot(v: Value, ty: Type, comp: *Compilation) Value {
 
 pub fn compare(a: Value, op: std.math.CompareOperator, b: Value, ty: Type, comp: *const Compilation) bool {
     assert(a.tag == b.tag);
+    if (a.tag == .nullptr_t) {
+        return switch (op) {
+            .eq => true,
+            .neq => false,
+            else => unreachable,
+        };
+    }
     const S = struct {
         inline fn doICompare(comptime T: type, aa: Value, opp: std.math.CompareOperator, bb: Value) bool {
             const a_val = aa.getInt(T);
@@ -538,8 +545,8 @@ pub fn compare(a: Value, op: std.math.CompareOperator, b: Value, ty: Type, comp:
             8 => return S.doICompare(u64, a, op, b),
             else => unreachable,
         } else switch (size) {
-            1 => return S.doICompare(u8, a, op, b),
-            2 => return S.doICompare(u16, a, op, b),
+            1 => return S.doICompare(i8, a, op, b),
+            2 => return S.doICompare(i16, a, op, b),
             4 => return S.doICompare(i32, a, op, b),
             8 => return S.doICompare(i64, a, op, b),
             else => unreachable,
@@ -565,9 +572,11 @@ pub fn hash(v: Value) u64 {
 pub fn dump(v: Value, ty: Type, comp: *Compilation, w: anytype) !void {
     switch (v.tag) {
         .unavailable => try w.writeAll("unavailable"),
-        .int => if (ty.isUnsignedInt(comp))
-            try w.print("{d}", .{v.data.int})
-        else {
+        .int => if (ty.is(.bool) and comp.langopts.standard.atLeast(.c2x)) {
+            try w.print("{s}", .{if (v.isZero()) "false" else "true"});
+        } else if (ty.isUnsignedInt(comp)) {
+            try w.print("{d}", .{v.data.int});
+        } else {
             try w.print("{d}", .{v.signExtend(ty, comp)});
         },
         .bytes => try w.print("\"{s}\"", .{v.data.bytes}),

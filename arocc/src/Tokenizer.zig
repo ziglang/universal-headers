@@ -188,6 +188,18 @@ pub const Token = struct {
         keyword_static_assert,
         keyword_thread_local,
 
+        // ISO C23
+        keyword_bit_int,
+        keyword_c23_alignas,
+        keyword_c23_alignof,
+        keyword_c23_bool,
+        keyword_c23_static_assert,
+        keyword_c23_thread_local,
+        keyword_constexpr,
+        keyword_true,
+        keyword_false,
+        keyword_nullptr,
+
         // Preprocessor directives
         keyword_include,
         keyword_include_next,
@@ -243,6 +255,12 @@ pub const Token = struct {
         keyword_int16_2,
         keyword_int8,
         keyword_int8_2,
+        keyword_stdcall,
+        keyword_stdcall2,
+        keyword_thiscall,
+        keyword_thiscall2,
+        keyword_vectorcall,
+        keyword_vectorcall2,
 
         // builtins that require special parsing
         builtin_choose_expr,
@@ -367,6 +385,22 @@ pub const Token = struct {
                 .keyword_int16_2,
                 .keyword_int8,
                 .keyword_int8_2,
+                .keyword_stdcall,
+                .keyword_stdcall2,
+                .keyword_thiscall,
+                .keyword_thiscall2,
+                .keyword_vectorcall,
+                .keyword_vectorcall2,
+                .keyword_bit_int,
+                .keyword_c23_alignas,
+                .keyword_c23_alignof,
+                .keyword_c23_bool,
+                .keyword_c23_static_assert,
+                .keyword_c23_thread_local,
+                .keyword_constexpr,
+                .keyword_true,
+                .keyword_false,
+                .keyword_nullptr,
                 => return true,
                 else => return false,
             }
@@ -545,6 +579,16 @@ pub const Token = struct {
                 .keyword_noreturn => "_Noreturn",
                 .keyword_static_assert => "_Static_assert",
                 .keyword_thread_local => "_Thread_local",
+                .keyword_bit_int => "_BitInt",
+                .keyword_c23_alignas => "alignas",
+                .keyword_c23_alignof => "alignof",
+                .keyword_c23_bool => "bool",
+                .keyword_c23_static_assert => "static_assert",
+                .keyword_c23_thread_local => "thread_local",
+                .keyword_constexpr => "constexpr",
+                .keyword_true => "true",
+                .keyword_false => "false",
+                .keyword_nullptr => "nullptr",
                 .keyword_include => "include",
                 .keyword_include_next => "include_next",
                 .keyword_define => "define",
@@ -598,6 +642,12 @@ pub const Token = struct {
                 .keyword_int16_2 => "_int16",
                 .keyword_int8 => "__int8",
                 .keyword_int8_2 => "_int8",
+                .keyword_stdcall => "__stdcall",
+                .keyword_stdcall2 => "_stdcall",
+                .keyword_thiscall => "__thiscall",
+                .keyword_thiscall2 => "_thiscall",
+                .keyword_vectorcall => "__vectorcall",
+                .keyword_vectorcall2 => "_vectorcall",
             };
         }
 
@@ -659,6 +709,8 @@ pub const Token = struct {
                 .one,
                 .zero,
                 .pp_num,
+                .keyword_true,
+                .keyword_false,
                 => true,
                 else => false,
             };
@@ -687,9 +739,21 @@ pub const Token = struct {
         return switch (kw) {
             .keyword_inline => if (standard.isGNU() or standard.atLeast(.c99)) kw else .identifier,
             .keyword_restrict => if (standard.atLeast(.c99)) kw else .identifier,
-            .keyword_typeof => if (standard.isGNU()) kw else .identifier,
+            .keyword_typeof => if (standard.isGNU() or standard.atLeast(.c2x)) kw else .identifier,
             .keyword_asm => if (standard.isGNU()) kw else .identifier,
             .keyword_declspec => if (comp.langopts.declspec_attrs) kw else .identifier,
+
+            .keyword_c23_alignas,
+            .keyword_c23_alignof,
+            .keyword_c23_bool,
+            .keyword_c23_static_assert,
+            .keyword_c23_thread_local,
+            .keyword_constexpr,
+            .keyword_true,
+            .keyword_false,
+            .keyword_nullptr,
+            => if (standard.atLeast(.c2x)) kw else .identifier,
+
             .keyword_int64,
             .keyword_int64_2,
             .keyword_int32,
@@ -698,6 +762,9 @@ pub const Token = struct {
             .keyword_int16_2,
             .keyword_int8,
             .keyword_int8_2,
+            .keyword_stdcall2,
+            .keyword_thiscall2,
+            .keyword_vectorcall2,
             => if (comp.langopts.ms_extensions) kw else .identifier,
             else => kw,
         };
@@ -776,6 +843,18 @@ pub const Token = struct {
         .{ "_Static_assert", .keyword_static_assert },
         .{ "_Thread_local", .keyword_thread_local },
 
+        // ISO C23
+        .{ "_BitInt", .keyword_bit_int },
+        .{ "alignas", .keyword_c23_alignas },
+        .{ "alignof", .keyword_c23_alignof },
+        .{ "bool", .keyword_c23_bool },
+        .{ "static_assert", .keyword_c23_static_assert },
+        .{ "thread_local", .keyword_c23_thread_local },
+        .{ "constexpr", .keyword_constexpr },
+        .{ "true", .keyword_true },
+        .{ "false", .keyword_false },
+        .{ "nullptr", .keyword_nullptr },
+
         // Preprocessor directives
         .{ "include", .keyword_include },
         .{ "include_next", .keyword_include_next },
@@ -834,6 +913,12 @@ pub const Token = struct {
         .{ "_int16", .keyword_int16_2 },
         .{ "__int8", .keyword_int8 },
         .{ "_int8", .keyword_int8_2 },
+        .{ "__stdcall", .keyword_stdcall },
+        .{ "_stdcall", .keyword_stdcall2 },
+        .{ "__thiscall", .keyword_thiscall },
+        .{ "_thiscall", .keyword_thiscall2 },
+        .{ "__vectorcall", .keyword_vectorcall },
+        .{ "_vectorcall", .keyword_vectorcall2 },
 
         // builtins that require special parsing
         .{ "__builtin_choose_expr", .builtin_choose_expr },
@@ -892,6 +977,7 @@ pub fn next(self: *Tokenizer) Token {
         multi_line_comment_done,
         pp_num,
         pp_num_exponent,
+        pp_num_digit_separator,
     } = .start;
 
     var start = self.index;
@@ -1520,7 +1606,29 @@ pub fn next(self: *Tokenizer) Token {
                 '.',
                 => {},
                 'e', 'E', 'p', 'P' => state = .pp_num_exponent,
+                '\'' => if (self.comp.langopts.standard.atLeast(.c2x)) {
+                    state = .pp_num_digit_separator;
+                } else {
+                    id = .pp_num;
+                    break;
+                },
                 else => {
+                    id = .pp_num;
+                    break;
+                },
+            },
+            .pp_num_digit_separator => switch (c) {
+                'a'...'d',
+                'A'...'D',
+                'f'...'o',
+                'F'...'O',
+                'q'...'z',
+                'Q'...'Z',
+                '0'...'9',
+                '_',
+                => state = .pp_num,
+                else => {
+                    self.index -= 1;
                     id = .pp_num;
                     break;
                 },
@@ -1582,7 +1690,7 @@ pub fn next(self: *Tokenizer) Token {
                 id = .hash;
                 self.index -= 1; // re-tokenize the percent
             },
-            .pp_num, .pp_num_exponent => id = .pp_num,
+            .pp_num, .pp_num_exponent, .pp_num_digit_separator => id = .pp_num,
         }
     }
 
@@ -1922,9 +2030,25 @@ test "digraphs" {
     try expectTokens("%:%42 %:%", &.{ .hash, .percent, .pp_num, .hash, .percent });
 }
 
-fn expectTokens(contents: []const u8, expected_tokens: []const Token.Id) !void {
+test "C23 keywords" {
+    try expectTokensExtra("true false alignas alignof bool static_assert thread_local nullptr", &.{
+        .keyword_true,
+        .keyword_false,
+        .keyword_c23_alignas,
+        .keyword_c23_alignof,
+        .keyword_c23_bool,
+        .keyword_c23_static_assert,
+        .keyword_c23_thread_local,
+        .keyword_nullptr,
+    }, .c2x);
+}
+
+fn expectTokensExtra(contents: []const u8, expected_tokens: []const Token.Id, standard: ?LangOpts.Standard) !void {
     var comp = Compilation.init(std.testing.allocator);
     defer comp.deinit();
+    if (standard) |provided| {
+        comp.langopts.standard = provided;
+    }
     const source = try comp.addSourceFromBuffer("path", contents);
     var tokenizer = Tokenizer{
         .buf = source.buf,
@@ -1944,4 +2068,8 @@ fn expectTokens(contents: []const u8, expected_tokens: []const Token.Id) !void {
     }
     const last_token = tokenizer.next();
     try std.testing.expect(last_token.id == .eof);
+}
+
+fn expectTokens(contents: []const u8, expected_tokens: []const Token.Id) !void {
+    return expectTokensExtra(contents, expected_tokens, null);
 }

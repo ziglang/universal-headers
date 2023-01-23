@@ -4,6 +4,8 @@ const Allocator = mem.Allocator;
 const Source = @import("Source.zig");
 const Compilation = @import("Compilation.zig");
 const Attribute = @import("Attribute.zig");
+const BuiltinFunction = @import("builtins/BuiltinFunction.zig");
+const Header = @import("builtins/Properties.zig").Header;
 const Tree = @import("Tree.zig");
 const util = @import("util.zig");
 const is_windows = @import("builtin").os.tag == .windows;
@@ -45,6 +47,10 @@ pub const Message = struct {
         ignored_record_attr: struct {
             tag: Attribute.Tag,
             specifier: enum { @"struct", @"union", @"enum" },
+        },
+        builtin_with_header: struct {
+            builtin: BuiltinFunction.Tag,
+            header: Header,
         },
         actual_codepoint: u21,
         ascii: u7,
@@ -147,6 +153,13 @@ pub const Options = packed struct {
     @"gnu-zero-variadic-macro-arguments": Kind = .default,
     @"main-return-type": Kind = .default,
     @"expansion-to-defined": Kind = .default,
+    @"bit-int-extension": Kind = .default,
+    @"keyword-macro": Kind = .default,
+    @"pointer-arith": Kind = .default,
+    @"sizeof-array-argument": Kind = .default,
+    @"pre-c2x-compat": Kind = .default,
+    @"pointer-bool-conversion": Kind = .default,
+    @"string-conversion": Kind = .default,
 };
 
 const messages = struct {
@@ -164,7 +177,7 @@ const messages = struct {
         const msg = "{s}";
         const opt = "#warnings";
         const extra = .str;
-        const kind = .@"warning";
+        const kind = .warning;
     };
     const elif_without_if = struct {
         const msg = "#elif without #if";
@@ -482,6 +495,20 @@ const messages = struct {
         const kind = .@"error";
         const all = true;
     };
+    const implicit_builtin = struct {
+        const msg = "implicitly declaring library function '{s}'";
+        const extra = .str;
+        const opt = "implicit-function-declaration";
+        const kind = .@"error";
+        const all = true;
+    };
+    const implicit_builtin_header_note = struct {
+        const msg = "include the header <{s}.h> or explicitly provide a declaration for '{s}'";
+        const extra = .builtin_with_header;
+        const opt = "implicit-function-declaration";
+        const kind = .note;
+        const all = true;
+    };
     const expected_param_decl = struct {
         const msg = "expected parameter declaration";
         const kind = .@"error";
@@ -722,6 +749,11 @@ const messages = struct {
         const kind = .warning;
         const suppress_gnu = true;
     };
+    const invalid_alignof = struct {
+        const msg = "invalid application of 'alignof' to an incomplete type '{s}'";
+        const extra = .str;
+        const kind = .@"error";
+    };
     const invalid_sizeof = struct {
         const msg = "invalid application of 'sizeof' to an incomplete type '{s}'";
         const extra = .str;
@@ -738,10 +770,25 @@ const messages = struct {
         const opt = "generic-qual-type";
         const kind = .warning;
     };
+    const generic_array_type = struct {
+        const msg = "generic association array type cannot be matched with";
+        const opt = "generic-qual-type";
+        const kind = .warning;
+    };
+    const generic_func_type = struct {
+        const msg = "generic association function type cannot be matched with";
+        const opt = "generic-qual-type";
+        const kind = .warning;
+    };
     const generic_duplicate = struct {
         const msg = "type '{s}' in generic association compatible with previously specified type";
         const extra = .str;
         const kind = .@"error";
+    };
+    const generic_duplicate_here = struct {
+        const msg = "compatible type '{s}' specified here";
+        const extra = .str;
+        const kind = .note;
     };
     const generic_duplicate_default = struct {
         const msg = "duplicate default generic association";
@@ -1031,6 +1078,13 @@ const messages = struct {
         const opt = "c2x-extensions";
         const kind = .warning;
         const suppress_version = .c2x;
+    };
+    const pre_c2x_compat = struct {
+        const msg = "{s} is incompatible with C standards before C2x";
+        const extra = .str;
+        const kind = .off;
+        const suppress_unless_version = .c2x;
+        const opt = "pre-c2x-compat";
     };
     const unbound_vla = struct {
         const msg = "variable length array must be bound in function definition";
@@ -1511,6 +1565,16 @@ const messages = struct {
         const extra = .str;
         const kind = .@"error";
     };
+    const cli_unused_link_object = struct {
+        const msg = "{s}: linker input file unused because linking not done";
+        const extra = .str;
+        const kind = .warning;
+    };
+    const cli_unknown_linker = struct {
+        const msg = "unrecognized linker '{s}'";
+        const extra = .str;
+        const kind = .@"error";
+    };
     const extra_semi = struct {
         const msg = "extra ';' outside of a function";
         const opt = "extra-semi";
@@ -1533,6 +1597,7 @@ const messages = struct {
     const flexible_in_union = struct {
         const msg = "flexible array member in union is not allowed";
         const kind = .@"error";
+        const suppress_msvc = true;
     };
     const flexible_non_final = struct {
         const msg = "flexible array member is not at the end of struct";
@@ -2058,6 +2123,97 @@ const messages = struct {
         const suppress_gcc = true;
         const suppress_clang = true;
     };
+    const declspec_not_allowed_after_declarator = struct {
+        const msg = "'declspec' attribute not allowed after declarator";
+        const kind = .@"error";
+    };
+    const declarator_name_tok = struct {
+        const msg = "this declarator";
+        const kind = .note;
+    };
+    const type_not_supported_on_target = struct {
+        const msg = "{s} is not supported on this target";
+        const extra = .str;
+        const kind = .@"error";
+    };
+    const bit_int = struct {
+        const msg = "'_BitInt' in C17 and earlier is a Clang extension'";
+        const kind = .off;
+        const pedantic = true;
+        const opt = "bit-int-extension";
+        const suppress_version = .c2x;
+    };
+    const unsigned_bit_int_too_small = struct {
+        const msg = "{s} must have a bit size of at least 1";
+        const extra = .str;
+        const kind = .@"error";
+    };
+    const signed_bit_int_too_small = struct {
+        const msg = "{s} must have a bit size of at least 2";
+        const extra = .str;
+        const kind = .@"error";
+    };
+    const bit_int_too_big = struct {
+        const msg = "{s} of bit sizes greater than 128 not supported";
+        const extra = .str;
+        const kind = .@"error";
+    };
+    const keyword_macro = struct {
+        const msg = "keyword is hidden by macro definition";
+        const kind = .off;
+        const pedantic = true;
+        const opt = "keyword-macro";
+    };
+    const ptr_arithmetic_incomplete = struct {
+        const msg = "arithmetic on a pointer to an incomplete type '{s}'";
+        const extra = .str;
+        const kind = .@"error";
+    };
+    const callconv_not_supported = struct {
+        const msg = "'{s}' calling convention is not supported for this target";
+        const extra = .str;
+        const opt = "ignored-attributes";
+        const kind = .warning;
+    };
+    const pointer_arith_void = struct {
+        const msg = "invalid application of '{s}' to a void type";
+        const extra = .str;
+        const kind = .off;
+        const pedantic = true;
+        const opt = "pointer-arith";
+    };
+    const sizeof_array_arg = struct {
+        const msg = "sizeof on array function parameter will return size of {s}";
+        const extra = .str;
+        const kind = .warning;
+        const opt = "sizeof-array-argument";
+    };
+    const array_address_to_bool = struct {
+        const msg = "address of array '{s}' will always evaluate to 'true'";
+        const extra = .str;
+        const kind = .warning;
+        const opt = "pointer-bool-conversion";
+    };
+    const string_literal_to_bool = struct {
+        const msg = "implicit conversion turns string literal into bool: {s}";
+        const extra = .str;
+        const kind = .off;
+        const opt = "string-conversion";
+    };
+    const constant_expression_conversion_not_allowed = struct {
+        const msg = "this conversion is not allowed in a constant expression";
+        const kind = .note;
+    };
+    const invalid_object_cast = struct {
+        const msg = "cannot cast an object of type {s}";
+        const extra = .str;
+        const kind = .@"error";
+    };
+    const cli_invalid_fp_eval_method = struct {
+        const msg = "unsupported argument '{s}' to option '-ffp-eval-method='; expected 'source', 'double', or 'extended'";
+        const extra = .str;
+        const kind = .@"error";
+    };
 };
 
 list: std.ArrayListUnmanaged(Message) = .{},
@@ -2167,6 +2323,8 @@ pub fn fatal(
     m.start(.@"fatal error");
     m.print(fmt, args);
     m.end(line, col, false);
+
+    diag.errors += 1;
     return error.FatalError;
 }
 
@@ -2181,6 +2339,7 @@ pub fn fatalNoSrc(diag: *Diagnostics, comptime fmt: []const u8, args: anytype) e
         std_err.print(fmt ++ "\n", args) catch {};
         util.setColor(.reset, std_err);
     }
+    diag.errors += 1;
     return error.FatalError;
 }
 
@@ -2193,13 +2352,6 @@ pub fn render(comp: *Compilation) void {
 pub fn defaultMsgWriter(comp: *const Compilation) MsgWriter {
     return MsgWriter.init(comp.diag.color);
 }
-
-/// This is a workaround for a stage1 bug when constructing an anonymous struct with a
-/// runtime conditional value
-/// See https://github.com/ziglang/zig/issues/5230
-const Pow2String = struct {
-    @"0": []const u8,
-};
 
 pub fn renderMessages(comp: *Compilation, m: anytype) void {
     var errors: u32 = 0;
@@ -2283,13 +2435,13 @@ pub fn renderMessage(comp: *Compilation, m: anytype, msg: Message) void {
                     .actual_codepoint => m.print(info.msg, .{msg.extra.actual_codepoint}),
                     .ascii => m.print(info.msg, .{msg.extra.ascii}),
                     .unsigned => m.print(info.msg, .{msg.extra.unsigned}),
-                    .pow_2_as_string => m.print(info.msg, Pow2String{ .@"0" = switch (msg.extra.pow_2_as_string) {
+                    .pow_2_as_string => m.print(info.msg, .{switch (msg.extra.pow_2_as_string) {
                         63 => "9223372036854775808",
                         64 => "18446744073709551616",
                         127 => "170141183460469231731687303715884105728",
                         128 => "340282366920938463463374607431768211456",
                         else => unreachable,
-                    } }),
+                    }}),
                     .signed => m.print(info.msg, .{msg.extra.signed}),
                     .attr_enum => m.print(info.msg, .{
                         @tagName(msg.extra.attr_enum.tag),
@@ -2298,6 +2450,10 @@ pub fn renderMessage(comp: *Compilation, m: anytype, msg: Message) void {
                     .ignored_record_attr => m.print(info.msg, .{
                         @tagName(msg.extra.ignored_record_attr.tag),
                         @tagName(msg.extra.ignored_record_attr.specifier),
+                    }),
+                    .builtin_with_header => m.print(info.msg, .{
+                        @tagName(msg.extra.builtin_with_header.header),
+                        @tagName(msg.extra.builtin_with_header.builtin),
                     }),
                     else => @compileError("invalid extra kind " ++ @tagName(info.extra)),
                 }
@@ -2342,6 +2498,7 @@ fn tagKind(diag: *Diagnostics, tag: Tag) Kind {
                 if (@field(diag.options, info.opt) != .default) kind = @field(diag.options, info.opt);
             }
             if (@hasDecl(info, "suppress_version")) if (comp.langopts.standard.atLeast(info.suppress_version)) return .off;
+            if (@hasDecl(info, "suppress_unless_version")) if (!comp.langopts.standard.atLeast(info.suppress_unless_version)) return .off;
             if (@hasDecl(info, "suppress_gnu")) if (comp.langopts.standard.isExplicitGNU()) return .off;
             if (@hasDecl(info, "suppress_language_option")) if (!@field(comp.langopts, info.suppress_language_option)) return .off;
             if (@hasDecl(info, "suppress_gcc")) if (comp.langopts.emulate == .gcc) return .off;

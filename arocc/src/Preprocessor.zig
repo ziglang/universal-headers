@@ -3,7 +3,7 @@ const mem = std.mem;
 const Allocator = mem.Allocator;
 const assert = std.debug.assert;
 const Compilation = @import("Compilation.zig");
-const Error = Compilation.Error || error{UnexpectedMacro};
+const Error = Compilation.Error;
 const Source = @import("Source.zig");
 const Tokenizer = @import("Tokenizer.zig");
 const RawToken = Tokenizer.Token;
@@ -67,8 +67,6 @@ comp: *Compilation,
 gpa: mem.Allocator,
 arena: std.heap.ArenaAllocator,
 defines: DefineMap,
-ok_defines: std.StringHashMapUnmanaged(void) = .{},
-unexpected_macro: []const u8 = undefined,
 tokens: Token.List = .{},
 token_buf: RawTokenList,
 char_buf: std.ArrayList(u8),
@@ -86,6 +84,10 @@ include_guards: std.AutoHashMapUnmanaged(Source.Id, []const u8) = .{},
 
 /// Memory is retained to avoid allocation on every single token.
 top_expansion_buf: ExpandBuf,
+
+/// Dump current state to stderr.
+verbose: bool = false,
+preserve_whitespace: bool = false,
 
 pub fn init(comp: *Compilation) Preprocessor {
     const pp = Preprocessor{
@@ -281,54 +283,52 @@ fn preprocessExtra(pp: *Preprocessor, source: Source) MacroError!Token {
                         }, &.{});
                     },
                     .keyword_if => {
-                        if (@addWithOverflow(u8, if_level, 1, &if_level))
+                        const ov = @addWithOverflow(if_level, 1);
+                        if (ov[1] != 0)
                             return pp.fatal(directive, "too many #if nestings", .{});
+                        if_level = ov[0];
 
                         if (try pp.expr(&tokenizer)) {
                             if_kind.set(if_level, until_endif);
-                            if (pp.comp.verbose_pp) {
+                            if (pp.verbose) {
                                 pp.verboseLog(directive, "entering then branch of #if", .{});
                             }
                         } else {
                             if_kind.set(if_level, until_else);
                             try pp.skip(&tokenizer, .until_else);
-                            if (pp.comp.verbose_pp) {
+                            if (pp.verbose) {
                                 pp.verboseLog(directive, "entering else branch of #if", .{});
                             }
                         }
                     },
                     .keyword_ifdef => {
-                        if (@addWithOverflow(u8, if_level, 1, &if_level))
+                        const ov = @addWithOverflow(if_level, 1);
+                        if (ov[1] != 0)
                             return pp.fatal(directive, "too many #if nestings", .{});
+                        if_level = ov[0];
 
                         const macro_name = (try pp.expectMacroName(&tokenizer)) orelse continue;
-                        if (!pp.ok_defines.contains(macro_name)) {
-                            pp.unexpected_macro = macro_name;
-                            return error.UnexpectedMacro;
-                        }
                         try pp.expectNl(&tokenizer);
                         if (pp.defines.get(macro_name) != null) {
                             if_kind.set(if_level, until_endif);
-                            if (pp.comp.verbose_pp) {
+                            if (pp.verbose) {
                                 pp.verboseLog(directive, "entering then branch of #ifdef", .{});
                             }
                         } else {
                             if_kind.set(if_level, until_else);
                             try pp.skip(&tokenizer, .until_else);
-                            if (pp.comp.verbose_pp) {
+                            if (pp.verbose) {
                                 pp.verboseLog(directive, "entering else branch of #ifdef", .{});
                             }
                         }
                     },
                     .keyword_ifndef => {
-                        if (@addWithOverflow(u8, if_level, 1, &if_level))
+                        const ov = @addWithOverflow(if_level, 1);
+                        if (ov[1] != 0)
                             return pp.fatal(directive, "too many #if nestings", .{});
+                        if_level = ov[0];
 
                         const macro_name = (try pp.expectMacroName(&tokenizer)) orelse continue;
-                        if (!pp.ok_defines.contains(macro_name)) {
-                            pp.unexpected_macro = macro_name;
-                            return error.UnexpectedMacro;
-                        }
                         try pp.expectNl(&tokenizer);
                         if (pp.defines.get(macro_name) == null) {
                             if_kind.set(if_level, until_endif);
@@ -348,12 +348,12 @@ fn preprocessExtra(pp: *Preprocessor, source: Source) MacroError!Token {
                         switch (if_kind.get(if_level)) {
                             until_else => if (try pp.expr(&tokenizer)) {
                                 if_kind.set(if_level, until_endif);
-                                if (pp.comp.verbose_pp) {
+                                if (pp.verbose) {
                                     pp.verboseLog(directive, "entering then branch of #elif", .{});
                                 }
                             } else {
                                 try pp.skip(&tokenizer, .until_else);
-                                if (pp.comp.verbose_pp) {
+                                if (pp.verbose) {
                                     pp.verboseLog(directive, "entering else branch of #elif", .{});
                                 }
                             },
@@ -376,7 +376,7 @@ fn preprocessExtra(pp: *Preprocessor, source: Source) MacroError!Token {
                         switch (if_kind.get(if_level)) {
                             until_else => {
                                 if_kind.set(if_level, until_endif_seen_else);
-                                if (pp.comp.verbose_pp) {
+                                if (pp.verbose) {
                                     pp.verboseLog(directive, "#else branch here", .{});
                                 }
                             },
@@ -469,10 +469,10 @@ fn preprocessExtra(pp: *Preprocessor, source: Source) MacroError!Token {
                     },
                 }
             },
-            .whitespace => if (pp.comp.only_preprocess) try pp.tokens.append(pp.gpa, tokFromRaw(tok)),
+            .whitespace => if (pp.preserve_whitespace) try pp.tokens.append(pp.gpa, tokFromRaw(tok)),
             .nl => {
                 start_of_line = true;
-                if (pp.comp.only_preprocess) try pp.tokens.append(pp.gpa, tokFromRaw(tok));
+                if (pp.preserve_whitespace) try pp.tokens.append(pp.gpa, tokFromRaw(tok));
             },
             .eof => {
                 if (if_level != 0) try pp.err(tok, .unterminated_conditional_directive);
@@ -664,6 +664,8 @@ fn expr(pp: *Preprocessor, tokenizer: *Tokenizer) MacroError!bool {
                 return false;
             },
             .macro_ws, .whitespace => continue,
+            .keyword_false => tok.id = .zero,
+            .keyword_true => tok.id = .one,
             else => if (tok.id.isMacroIdentifier()) {
                 if (tok.id == .keyword_defined) {
                     const tokens_consumed = try pp.handleKeywordDefined(&tok, items[i + 1 ..], eof);
@@ -882,7 +884,7 @@ fn expandObjMacro(pp: *Preprocessor, simple_macro: *const Macro) Error!ExpandBuf
                 }
                 try pp.pasteTokens(&buf, &.{rhs});
             },
-            .whitespace => if (pp.comp.only_preprocess) buf.appendAssumeCapacity(tok),
+            .whitespace => if (pp.preserve_whitespace) buf.appendAssumeCapacity(tok),
             .macro_file => {
                 const start = pp.comp.generated_buf.items.len;
                 const source = pp.comp.getSource(pp.expansion_source_loc.id);
@@ -1136,7 +1138,7 @@ fn handleBuiltinMacro(pp: *Preprocessor, builtin: RawToken.Id, param_toks: []con
                 .macro_param_has_attribute => Attribute.fromString(.gnu, null, ident_str) != null,
                 .macro_param_has_feature => features.hasFeature(pp.comp, ident_str),
                 .macro_param_has_extension => features.hasExtension(pp.comp, ident_str),
-                .macro_param_has_builtin => pp.comp.builtins.hasBuiltin(ident_str),
+                .macro_param_has_builtin => pp.comp.hasBuiltin(ident_str),
                 else => unreachable,
             };
         },
@@ -1486,7 +1488,7 @@ fn collectMacroFuncArguments(
         switch (tok.id) {
             .comma => {
                 if (parens == 0) {
-                    const owned = curArgument.toOwnedSlice();
+                    const owned = try curArgument.toOwnedSlice();
                     errdefer pp.gpa.free(owned);
                     try args.append(owned);
                 } else {
@@ -1503,7 +1505,7 @@ fn collectMacroFuncArguments(
             },
             .r_paren => {
                 if (parens == 0) {
-                    const owned = curArgument.toOwnedSlice();
+                    const owned = try curArgument.toOwnedSlice();
                     errdefer pp.gpa.free(owned);
                     try args.append(owned);
                     break;
@@ -1516,7 +1518,7 @@ fn collectMacroFuncArguments(
             },
             .eof => {
                 {
-                    const owned = curArgument.toOwnedSlice();
+                    const owned = try curArgument.toOwnedSlice();
                     errdefer pp.gpa.free(owned);
                     try args.append(owned);
                 }
@@ -1692,7 +1694,7 @@ fn expandMacroExhaustive(
 
                         try pp.expandMacroExhaustive(tokenizer, &expand_buf, 0, expand_buf.items.len, false, eval_ctx);
 
-                        expanded_args.appendAssumeCapacity(expand_buf.toOwnedSlice());
+                        expanded_args.appendAssumeCapacity(try expand_buf.toOwnedSlice());
                     }
 
                     var res = try pp.expandFuncMacro(macro_tok.loc, macro, &args, &expanded_args);
@@ -1773,14 +1775,14 @@ fn expandMacro(pp: *Preprocessor, tokenizer: *Tokenizer, raw: RawToken) MacroErr
     try pp.expandMacroExhaustive(tokenizer, &pp.top_expansion_buf, 0, 1, true, .non_expr);
     try pp.tokens.ensureUnusedCapacity(pp.gpa, pp.top_expansion_buf.items.len);
     for (pp.top_expansion_buf.items) |*tok| {
-        if (tok.id == .macro_ws and !pp.comp.only_preprocess) {
+        if (tok.id == .macro_ws and !pp.preserve_whitespace) {
             Token.free(tok.expansion_locs, pp.gpa);
             continue;
         }
         tok.id.simplifyMacroKeywordExtra(true);
         pp.tokens.appendAssumeCapacity(tok.*);
     }
-    if (pp.comp.only_preprocess) {
+    if (pp.preserve_whitespace) {
         try pp.tokens.ensureUnusedCapacity(pp.gpa, pp.add_expansion_nl);
         while (pp.add_expansion_nl > 0) : (pp.add_expansion_nl -= 1) {
             pp.tokens.appendAssumeCapacity(.{ .id = .nl, .loc = .{ .id = .generated } });
@@ -1893,7 +1895,7 @@ fn defineMacro(pp: *Preprocessor, name_tok: RawToken, macro: Macro) Error!void {
         }, &.{});
         // TODO add a previous definition note
     }
-    if (pp.comp.verbose_pp) {
+    if (pp.verbose) {
         pp.verboseLog(name_tok, "macro {s} defined", .{name_str});
     }
     gop.value_ptr.* = macro;
@@ -1910,6 +1912,14 @@ fn define(pp: *Preprocessor, tokenizer: *Tokenizer) Error!void {
     if (!macro_name.id.isMacroIdentifier()) {
         try pp.err(macro_name, .macro_name_must_be_identifier);
         return skipToNl(tokenizer);
+    }
+    var macro_name_token_id = macro_name.id;
+    macro_name_token_id.simplifyMacroKeyword();
+    switch (macro_name_token_id) {
+        .identifier, .extended_identifier => {},
+        else => if (macro_name_token_id.isMacroIdentifier()) {
+            try pp.err(macro_name, .keyword_macro);
+        },
     }
 
     // Check for function macros and empty defines.
@@ -2158,7 +2168,7 @@ fn include(pp: *Preprocessor, tokenizer: *Tokenizer, which: Compilation.WhichInc
         if (pp.defines.contains(guard)) return;
     }
 
-    if (pp.comp.verbose_pp) {
+    if (pp.verbose) {
         pp.verboseLog(first, "include file {s}", .{new_source.path});
     }
 
@@ -2359,12 +2369,13 @@ test "Preserve pragma tokens sometimes" {
 
             var comp = Compilation.init(allocator);
             defer comp.deinit();
-            comp.only_preprocess = true;
 
             try comp.addDefaultPragmaHandlers();
 
             var pp = Preprocessor.init(&comp);
             defer pp.deinit();
+
+            pp.preserve_whitespace = true;
 
             const test_runner_macros = try comp.addSourceFromBuffer("<test_runner>", source_text);
             const eof = try pp.preprocess(test_runner_macros);

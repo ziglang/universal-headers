@@ -6,6 +6,7 @@ const Source = @import("Source.zig");
 const Attribute = @import("Attribute.zig");
 const Value = @import("Value.zig");
 const StringInterner = @import("StringInterner.zig");
+const BuiltinFunction = @import("builtins/BuiltinFunction.zig");
 
 const Tree = @This();
 
@@ -33,8 +34,9 @@ pub const Token = struct {
         var list = std.ArrayList(Source.Location).init(gpa);
         defer {
             std.mem.set(Source.Location, list.items.ptr[list.items.len..list.capacity], .{});
-            // add a sentinel since the allocator is not guaranteed
-            // to return the exact desired size
+            // Add a sentinel to indicate the end of the list since
+            // the ArrayList's capacity isn't guaranteed to be exactly
+            // what we ask for.
             if (list.capacity > 0) {
                 list.items.ptr[list.capacity - 1].byte_offset = 1;
             }
@@ -310,8 +312,6 @@ pub const Tag = enum(u8) {
     compound_stmt,
     /// if (first) data[second] else data[second+1];
     if_then_else_stmt,
-    /// if (first); else second;
-    if_else_stmt,
     /// if (first) second; second may be null
     if_then_stmt,
     /// switch (first) second
@@ -462,6 +462,10 @@ pub const Tag = enum(u8) {
     decl_ref_expr,
     /// decl_ref
     enumeration_ref,
+    /// C23 bool literal `true` / `false`
+    bool_literal,
+    /// C23 nullptr literal
+    nullptr_literal,
     /// integer literal, always unsigned
     int_literal,
     /// Same as int_literal, but originates from a char literal
@@ -488,6 +492,8 @@ pub const Tag = enum(u8) {
     generic_default_expr,
     /// __builtin_choose_expr(lhs, data[0], data[1])
     builtin_choose_expr,
+    /// decl - special builtins require custom parsing
+    special_builtin_call_one,
     /// ({ un })
     stmt_expr,
 
@@ -659,10 +665,10 @@ fn dumpAttribute(attr: Attribute, writer: anytype) !void {
                 }
                 try writer.writeAll(f.name);
                 try writer.writeAll(": ");
-                switch (f.field_type) {
+                switch (f.type) {
                     []const u8 => try writer.print("\"{s}\"", .{@field(args, f.name)}),
                     ?[]const u8 => try writer.print("\"{?s}\"", .{@field(args, f.name)}),
-                    else => switch (@typeInfo(f.field_type)) {
+                    else => switch (@typeInfo(f.type)) {
                         .Enum => try writer.writeAll(@tagName(@field(args, f.name))),
                         else => try writer.print("{any}", .{@field(args, f.name)}),
                     },
@@ -699,7 +705,7 @@ fn dumpNode(tree: Tree, node: NodeIndex, level: u32, mapper: StringInterner.Type
     }
     if (color) util.setColor(TYPE, w);
     try w.writeByte('\'');
-    try ty.dump(mapper, w);
+    try ty.dump(mapper, tree.comp.langopts, w);
     try w.writeByte('\'');
 
     if (isLval(tree.nodes, tree.data, tree.value_map, node)) {
@@ -936,15 +942,6 @@ fn dumpNode(tree: Tree, node: NodeIndex, level: u32, mapper: StringInterner.Type
             try w.writeAll("else:\n");
             try tree.dumpNode(tree.data[data.if3.body + 1], level + delta, mapper, color, w);
         },
-        .if_else_stmt => {
-            try w.writeByteNTimes(' ', level + half);
-            try w.writeAll("cond:\n");
-            try tree.dumpNode(data.bin.lhs, level + delta, mapper, color, w);
-
-            try w.writeByteNTimes(' ', level + half);
-            try w.writeAll("else:\n");
-            try tree.dumpNode(data.bin.rhs, level + delta, mapper, color, w);
-        },
         .if_then_stmt => {
             try w.writeByteNTimes(' ', level + half);
             try w.writeAll("cond:\n");
@@ -1080,6 +1077,18 @@ fn dumpNode(tree: Tree, node: NodeIndex, level: u32, mapper: StringInterner.Type
                 try tree.dumpNode(data.decl.node, level + delta, mapper, color, w);
             }
         },
+        .special_builtin_call_one => {
+            try w.writeByteNTimes(' ', level + half);
+            try w.writeAll("name: ");
+            if (color) util.setColor(NAME, w);
+            try w.print("{s}\n", .{tree.tokSlice(data.decl.name)});
+            if (color) util.setColor(.reset, w);
+            if (data.decl.node != .none) {
+                try w.writeByteNTimes(' ', level + half);
+                try w.writeAll("arg:\n");
+                try tree.dumpNode(data.decl.node, level + delta, mapper, color, w);
+            }
+        },
         .comma_expr,
         .assign_expr,
         .mul_assign_expr,
@@ -1152,6 +1161,8 @@ fn dumpNode(tree: Tree, node: NodeIndex, level: u32, mapper: StringInterner.Type
             try w.print("{s}\n", .{tree.tokSlice(data.decl_ref)});
             if (color) util.setColor(.reset, w);
         },
+        .bool_literal,
+        .nullptr_literal,
         .int_literal,
         .char_literal,
         .float_literal,
@@ -1195,8 +1206,10 @@ fn dumpNode(tree: Tree, node: NodeIndex, level: u32, mapper: StringInterner.Type
             try w.writeAll("controlling:\n");
             try tree.dumpNode(data.bin.lhs, level + delta, mapper, color, w);
             try w.writeByteNTimes(' ', level + 1);
-            try w.writeAll("chosen:\n");
-            try tree.dumpNode(data.bin.rhs, level + delta, mapper, color, w);
+            if (data.bin.rhs != .none) {
+                try w.writeAll("chosen:\n");
+                try tree.dumpNode(data.bin.rhs, level + delta, mapper, color, w);
+            }
         },
         .generic_expr => {
             const nodes = tree.data[data.range.start..data.range.end];
