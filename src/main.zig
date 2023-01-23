@@ -383,7 +383,7 @@ const Merger = struct {
                 // Now we sort by the defines that apply to the most symbols.
                 const lhs_conjunctives = lhs.clauses.conjunctives;
                 const rhs_conjunctives = rhs.clauses.conjunctives;
-                for (lhs_conjunctives[0..@minimum(lhs_conjunctives.len, rhs_conjunctives.len)]) |lhs_conjunctive, i| {
+                for (lhs_conjunctives[0..@min(lhs_conjunctives.len, rhs_conjunctives.len)]) |lhs_conjunctive, i| {
                     const lhs_name = lhs_conjunctive[0].name;
                     const rhs_name = rhs_conjunctives[i][0].name;
                     if (mem.eql(u8, lhs_name, rhs_name)) {
@@ -442,7 +442,6 @@ const Merger = struct {
             defer comp.deinit();
 
             comp.target = header.input.target;
-            comp.only_preprocess = true;
             comp.skip_standard_macros = true;
             try comp.system_include_dirs.append(try std.fmt.allocPrint(comp.gpa, "{s}/{s}", .{
                 m.in_path, header.input.path,
@@ -457,6 +456,7 @@ const Merger = struct {
 
             var pp = arocc.Preprocessor.init(&comp);
             defer pp.deinit();
+            pp.preserve_whitespace = true;
 
             var macro_buf = std.ArrayList(u8).init(comp.gpa);
             defer macro_buf.deinit();
