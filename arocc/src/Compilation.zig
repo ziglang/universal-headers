@@ -13,6 +13,9 @@ const Type = @import("Type.zig");
 const Pragma = @import("Pragma.zig");
 const StringInterner = @import("StringInterner.zig");
 const record_layout = @import("record_layout.zig");
+const CType = Type.CType;
+const target = @import("target.zig");
+const BuiltinFunction = @import("builtins/BuiltinFunction.zig");
 
 const Compilation = @This();
 
@@ -26,26 +29,33 @@ sources: std.StringArrayHashMap(Source),
 diag: Diagnostics,
 include_dirs: std.ArrayList([]const u8),
 system_include_dirs: std.ArrayList([]const u8),
-output_name: ?[]const u8 = null,
 target: std.Target = @import("builtin").target,
 pragma_handlers: std.StringArrayHashMap(*Pragma),
-only_preprocess: bool = false,
-only_compile: bool = false,
-verbose_ast: bool = false,
-skip_standard_macros: bool = false,
-verbose_pp: bool = false,
 langopts: LangOpts = .{},
 generated_buf: std.ArrayList(u8),
 builtins: Builtins = .{},
 types: struct {
-    wchar: Type,
-    ptrdiff: Type,
-    size: Type,
-    va_list: Type,
-} = undefined,
+    wchar: Type = undefined,
+    ptrdiff: Type = undefined,
+    size: Type = undefined,
+    va_list: Type = undefined,
+    pid_t: Type = undefined,
+    ns_constant_string: struct {
+        ty: Type = undefined,
+        record: Type.Record = undefined,
+        fields: [4]Type.Record.Field = undefined,
+        int_ty: Type = .{ .specifier = .int, .qual = .{ .@"const" = true } },
+        char_ty: Type = .{ .specifier = .char, .qual = .{ .@"const" = true } },
+    } = .{},
+    file: Type = .{ .specifier = .invalid },
+    jmp_buf: Type = .{ .specifier = .invalid },
+    sigjmp_buf: Type = .{ .specifier = .invalid },
+    ucontext_t: Type = .{ .specifier = .invalid },
+} = .{},
 /// Mapping from Source.Id to byte offset of first non-utf8 byte
 invalid_utf8_locs: std.AutoHashMapUnmanaged(Source.Id, u32) = .{},
 string_interner: StringInterner = .{},
+skip_standard_macros: bool = false,
 
 pub fn init(gpa: Allocator) Compilation {
     return .{
@@ -125,7 +135,6 @@ fn generateDateAndTime(w: anytype) !void {
 /// Generate builtin macros that will be available to each source file.
 pub fn generateBuiltinMacros(comp: *Compilation, buf: *std.ArrayList(u8)) !Source {
     try comp.generateBuiltinTypes();
-    comp.builtins = try Builtins.create(comp);
 
     const w = buf.writer();
 
@@ -155,7 +164,7 @@ pub fn generateBuiltinMacros(comp: *Compilation, buf: *std.ArrayList(u8)) !Sourc
                 \\#define __linux__ 1
                 \\
             ),
-            .windows => if (comp.target.cpu.arch.ptrBitWidth() == 32) try w.writeAll(
+            .windows => if (CType.ptrBitWidth(comp.target) == 32) try w.writeAll(
                 \\#define WIN32 1
                 \\#define _WIN32 1
                 \\#define __WIN32 1
@@ -217,7 +226,7 @@ pub fn generateBuiltinMacros(comp: *Compilation, buf: *std.ArrayList(u8)) !Sourc
                 \\#define __x86_64__ 1
                 \\
             ),
-            .i386 => try w.writeAll(
+            .x86 => try w.writeAll(
                 \\#define i386 1
                 \\#define __i386 1
                 \\#define __i386__ 1
@@ -288,7 +297,7 @@ pub fn generateBuiltinMacros(comp: *Compilation, buf: *std.ArrayList(u8)) !Sourc
             else => {},
         }
 
-        if (comp.target.os.tag != .windows) switch (comp.target.cpu.arch.ptrBitWidth()) {
+        if (comp.target.os.tag != .windows) switch (CType.ptrBitWidth(comp.target)) {
             64 => try w.writeAll(
                 \\#define _LP64 1
                 \\#define __LP64__ 1
@@ -318,7 +327,7 @@ pub fn generateBuiltinMacros(comp: *Compilation, buf: *std.ArrayList(u8)) !Sourc
         try generateDateAndTime(w);
 
         // types
-        if (Type.getCharSignedness(comp) == .unsigned) try w.writeAll("#define __CHAR_UNSIGNED__ 1\n");
+        if (target.getCharSignedness(comp.target) == .unsigned) try w.writeAll("#define __CHAR_UNSIGNED__ 1\n");
         try w.writeAll("#define __CHAR_BIT__ 8\n");
 
         // int maxs
@@ -336,6 +345,9 @@ pub fn generateBuiltinMacros(comp: *Compilation, buf: *std.ArrayList(u8)) !Sourc
         // try comp.generateIntMax(w, "__INTPTR_MAX__", comp.types.wchar);
         // try comp.generateIntMax(w, "__UINTPTR_MAX__", comp.types.size);
 
+        // int widths
+        try w.writeAll("#define __BITINT_MAXWIDTH__ 128\n");
+
         // sizeof types
         try comp.generateSizeofType(w, "__SIZEOF_FLOAT__", .{ .specifier = .float });
         try comp.generateSizeofType(w, "__SIZEOF_DOUBLE__", .{ .specifier = .double });
@@ -352,17 +364,117 @@ pub fn generateBuiltinMacros(comp: *Compilation, buf: *std.ArrayList(u8)) !Sourc
 
         // various int types
         const mapper = comp.string_interner.getSlowTypeMapper();
-        try generateTypeMacro(w, mapper, "__PTRDIFF_TYPE__", comp.types.ptrdiff);
-        try generateTypeMacro(w, mapper, "__SIZE_TYPE__", comp.types.size);
-        try generateTypeMacro(w, mapper, "__WCHAR_TYPE__", comp.types.wchar);
+        try generateTypeMacro(w, mapper, "__PTRDIFF_TYPE__", comp.types.ptrdiff, comp.langopts);
+        try generateTypeMacro(w, mapper, "__SIZE_TYPE__", comp.types.size, comp.langopts);
+        try generateTypeMacro(w, mapper, "__WCHAR_TYPE__", comp.types.wchar, comp.langopts);
+
+        if (target.FPSemantics.halfPrecisionType(comp.target)) |half| {
+            try generateFloatMacros(w, "FLT16", half, "F16");
+        }
+        try generateFloatMacros(w, "FLT", target.FPSemantics.forType(CType.float, comp.target), "F");
+        try generateFloatMacros(w, "DBL", target.FPSemantics.forType(CType.double, comp.target), "");
+        try generateFloatMacros(w, "LDBL", target.FPSemantics.forType(CType.longdouble, comp.target), "L");
+
+        // TODO: clang treats __FLT_EVAL_METHOD__ as a special-cased macro because evaluating it within a scope
+        // where `#pragma clang fp eval_method(X)` has been called produces an error diagnostic.
+        const flt_eval_method = comp.langopts.fp_eval_method orelse target.defaultFpEvalMethod(comp.target);
+        try w.print("#define __FLT_EVAL_METHOD__ {d}\n", .{@enumToInt(flt_eval_method)});
+
+        try w.writeAll(
+            \\#define __FLT_RADIX__ 2
+            \\#define __DECIMAL_DIG__ __LDBL_DECIMAL_DIG__
+            \\
+        );
     }
 
     return comp.addSourceFromBuffer("<builtin>", buf.items);
 }
 
-fn generateTypeMacro(w: anytype, mapper: StringInterner.TypeMapper, name: []const u8, ty: Type) !void {
+fn generateFloatMacros(w: anytype, prefix: []const u8, semantics: target.FPSemantics, ext: []const u8) !void {
+    const denormMin = semantics.chooseValue(
+        []const u8,
+        .{
+            "5.9604644775390625e-8",
+            "1.40129846e-45",
+            "4.9406564584124654e-324",
+            "3.64519953188247460253e-4951",
+            "4.94065645841246544176568792868221e-324",
+            "6.47517511943802511092443895822764655e-4966",
+        },
+    );
+    const digits = semantics.chooseValue(i32, .{ 3, 6, 15, 18, 31, 33 });
+    const decimalDigits = semantics.chooseValue(i32, .{ 5, 9, 17, 21, 33, 36 });
+    const epsilon = semantics.chooseValue(
+        []const u8,
+        .{
+            "9.765625e-4",
+            "1.19209290e-7",
+            "2.2204460492503131e-16",
+            "1.08420217248550443401e-19",
+            "4.94065645841246544176568792868221e-324",
+            "1.92592994438723585305597794258492732e-34",
+        },
+    );
+    const mantissaDigits = semantics.chooseValue(i32, .{ 11, 24, 53, 64, 106, 113 });
+
+    const min10Exp = semantics.chooseValue(i32, .{ -4, -37, -307, -4931, -291, -4931 });
+    const max10Exp = semantics.chooseValue(i32, .{ 4, 38, 308, 4932, 308, 4932 });
+
+    const minExp = semantics.chooseValue(i32, .{ -13, -125, -1021, -16381, -968, -16381 });
+    const maxExp = semantics.chooseValue(i32, .{ 16, 128, 1024, 16384, 1024, 16384 });
+
+    const min = semantics.chooseValue(
+        []const u8,
+        .{
+            "6.103515625e-5",
+            "1.17549435e-38",
+            "2.2250738585072014e-308",
+            "3.36210314311209350626e-4932",
+            "2.00416836000897277799610805135016e-292",
+            "3.36210314311209350626267781732175260e-4932",
+        },
+    );
+    const max = semantics.chooseValue(
+        []const u8,
+        .{
+            "6.5504e+4",
+            "3.40282347e+38",
+            "1.7976931348623157e+308",
+            "1.18973149535723176502e+4932",
+            "1.79769313486231580793728971405301e+308",
+            "1.18973149535723176508575932662800702e+4932",
+        },
+    );
+
+    var buf: [32]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&buf);
+    var defPrefix = std.ArrayList(u8).initCapacity(fba.allocator(), 3 + prefix.len) catch unreachable; // fib
+    defPrefix.appendSliceAssumeCapacity("__");
+    defPrefix.appendSliceAssumeCapacity(prefix);
+    defPrefix.appendSliceAssumeCapacity("_");
+
+    try w.print("#define {s}DENORM_MIN__ {s}{s}\n", .{ defPrefix.items, denormMin, ext });
+    try w.print("#define {s}HAS_DENORM__\n", .{defPrefix.items});
+    try w.print("#define {s}DIG__ {d}\n", .{ defPrefix.items, digits });
+    try w.print("#define {s}DECIMAL_DIG__ {d}\n", .{ defPrefix.items, decimalDigits });
+
+    try w.print("#define {s}EPSILON__ {s}{s}\n", .{ defPrefix.items, epsilon, ext });
+    try w.print("#define {s}HAS_INFINITY__\n", .{defPrefix.items});
+    try w.print("#define {s}HAS_QUIET_NAN__\n", .{defPrefix.items});
+    try w.print("#define {s}MANT_DIG__ {d}\n", .{ defPrefix.items, mantissaDigits });
+
+    try w.print("#define {s}MAX_10_EXP__ {d}\n", .{ defPrefix.items, max10Exp });
+    try w.print("#define {s}MAX_EXP__ {d}\n", .{ defPrefix.items, maxExp });
+    try w.print("#define {s}MAX__ {s}{s}\n", .{ defPrefix.items, max, ext });
+
+    try w.print("#define {s}MIN_10_EXP__ ({d})\n", .{ defPrefix.items, min10Exp });
+    try w.print("#define {s}MIN_EXP__ ({d})\n", .{ defPrefix.items, minExp });
+    try w.print("#define {s}MIN__ {s}{s}\n", .{ defPrefix.items, min, ext });
+}
+
+fn generateTypeMacro(w: anytype, mapper: StringInterner.TypeMapper, name: []const u8, ty: Type, langopts: LangOpts) !void {
     try w.print("#define {s} ", .{name});
-    try ty.print(mapper, w);
+    try ty.print(mapper, langopts, w);
     try w.writeByte('\n');
 }
 
@@ -377,22 +489,22 @@ fn generateBuiltinTypes(comp: *Compilation) !void {
         .aarch64, .aarch64_be, .aarch64_32 => .{
             .specifier = if (!os.isDarwin() and os != .netbsd) .uint else .int,
         },
-        .x86_64, .i386 => .{ .specifier = if (os == .windows) .ushort else .int },
+        .x86_64, .x86 => .{ .specifier = if (os == .windows) .ushort else .int },
         else => .{ .specifier = .int },
     };
 
-    const ptrdiff = if (os == .windows and comp.target.cpu.arch.ptrBitWidth() == 64)
+    const ptrdiff = if (os == .windows and CType.ptrBitWidth(comp.target) == 64)
         Type{ .specifier = .long_long }
-    else switch (comp.target.cpu.arch.ptrBitWidth()) {
+    else switch (CType.ptrBitWidth(comp.target)) {
         16 => Type{ .specifier = .int },
         32 => Type{ .specifier = .int },
         64 => Type{ .specifier = .long },
         else => unreachable,
     };
 
-    const size = if (os == .windows and comp.target.cpu.arch.ptrBitWidth() == 64)
+    const size = if (os == .windows and CType.ptrBitWidth(comp.target) == 64)
         Type{ .specifier = .ulong_long }
-    else switch (comp.target.cpu.arch.ptrBitWidth()) {
+    else switch (CType.ptrBitWidth(comp.target)) {
         16 => Type{ .specifier = .uint },
         32 => Type{ .specifier = .uint },
         64 => Type{ .specifier = .ulong },
@@ -401,12 +513,39 @@ fn generateBuiltinTypes(comp: *Compilation) !void {
 
     const va_list = try comp.generateVaListType();
 
+    const pid_t: Type = switch (os) {
+        .haiku => .{ .specifier = .long },
+        // Todo: pid_t is required to "a signed integer type"; are there any systems
+        // on which it is `short int`?
+        else => .{ .specifier = .int },
+    };
+
     comp.types = .{
         .wchar = wchar,
         .ptrdiff = ptrdiff,
         .size = size,
         .va_list = va_list,
+        .pid_t = pid_t,
     };
+    try comp.generateNsConstantStringType();
+}
+
+fn generateNsConstantStringType(comp: *Compilation) !void {
+    comp.types.ns_constant_string.record = .{
+        .name = try comp.intern("__NSConstantString_tag"),
+        .fields = &comp.types.ns_constant_string.fields,
+        .field_attributes = null,
+        .type_layout = undefined,
+    };
+    const const_int_ptr = Type{ .specifier = .pointer, .data = .{ .sub_type = &comp.types.ns_constant_string.int_ty } };
+    const const_char_ptr = Type{ .specifier = .pointer, .data = .{ .sub_type = &comp.types.ns_constant_string.char_ty } };
+
+    comp.types.ns_constant_string.fields[0] = .{ .name = try comp.intern("isa"), .ty = const_int_ptr };
+    comp.types.ns_constant_string.fields[1] = .{ .name = try comp.intern("flags"), .ty = .{ .specifier = .int } };
+    comp.types.ns_constant_string.fields[2] = .{ .name = try comp.intern("str"), .ty = const_char_ptr };
+    comp.types.ns_constant_string.fields[3] = .{ .name = try comp.intern("length"), .ty = .{ .specifier = .long } };
+    comp.types.ns_constant_string.ty = .{ .specifier = .@"struct", .data = .{ .record = &comp.types.ns_constant_string.record } };
+    record_layout.compute(&comp.types.ns_constant_string.record, comp.types.ns_constant_string.ty, comp, null);
 }
 
 fn generateVaListType(comp: *Compilation) !Type {
@@ -422,7 +561,7 @@ fn generateVaListType(comp: *Compilation) !Type {
             .ios, .macos, .tvos, .watchos, .aix => @as(Kind, .char_ptr),
             else => return Type{ .specifier = .void }, // unknown
         },
-        .i386, .msp430 => .char_ptr,
+        .x86, .msp430 => .char_ptr,
         .x86_64 => switch (comp.target.os.tag) {
             .windows => @as(Kind, .char_ptr),
             else => .x86_64_va_list,
@@ -443,7 +582,7 @@ fn generateVaListType(comp: *Compilation) !Type {
                 .name = try comp.intern("__va_list_tag"),
                 .fields = try arena.alloc(Type.Record.Field, 5),
                 .field_attributes = null,
-                .type_layout = Type.TypeLayout.init(32, 8),
+                .type_layout = undefined, // computed below
             };
             const void_ty = try arena.create(Type);
             void_ty.* = .{ .specifier = .void };
@@ -454,7 +593,7 @@ fn generateVaListType(comp: *Compilation) !Type {
             record_ty.fields[3] = .{ .name = try comp.intern("__gr_offs"), .ty = .{ .specifier = .int } };
             record_ty.fields[4] = .{ .name = try comp.intern("__vr_offs"), .ty = .{ .specifier = .int } };
             ty = .{ .specifier = .@"struct", .data = .{ .record = record_ty } };
-            record_layout.compute(&ty, comp, null);
+            record_layout.compute(record_ty, ty, comp, null);
         },
         .x86_64_va_list => {
             const record_ty = try arena.create(Type.Record);
@@ -462,7 +601,7 @@ fn generateVaListType(comp: *Compilation) !Type {
                 .name = try comp.intern("__va_list_tag"),
                 .fields = try arena.alloc(Type.Record.Field, 4),
                 .field_attributes = null,
-                .type_layout = Type.TypeLayout.init(24, 8),
+                .type_layout = undefined, // computed below
             };
             const void_ty = try arena.create(Type);
             void_ty.* = .{ .specifier = .void };
@@ -472,7 +611,7 @@ fn generateVaListType(comp: *Compilation) !Type {
             record_ty.fields[2] = .{ .name = try comp.intern("overflow_arg_area"), .ty = void_ptr };
             record_ty.fields[3] = .{ .name = try comp.intern("reg_save_area"), .ty = void_ptr };
             ty = .{ .specifier = .@"struct", .data = .{ .record = record_ty } };
-            record_layout.compute(&ty, comp, null);
+            record_layout.compute(record_ty, ty, comp, null);
         },
     }
     if (kind == .char_ptr or kind == .void_ptr) {
@@ -700,7 +839,7 @@ pub fn addSourceFromReader(comp: *Compilation, reader: anytype, path: []const u8
         }
     }
 
-    const splice_locs = splice_list.toOwnedSlice();
+    const splice_locs = try splice_list.toOwnedSlice();
     errdefer comp.gpa.free(splice_locs);
 
     if (i != contents.len) contents = try comp.gpa.realloc(contents, i);
@@ -928,119 +1067,29 @@ pub fn pragmaEvent(comp: *Compilation, event: PragmaEvent) void {
     }
 }
 
+pub fn hasBuiltin(comp: *const Compilation, name: []const u8) bool {
+    if (std.mem.eql(u8, name, "__builtin_va_arg") or
+        std.mem.eql(u8, name, "__builtin_choose_expr") or
+        std.mem.eql(u8, name, "__builtin_bitoffsetof") or
+        std.mem.eql(u8, name, "__builtin_offsetof")) return true;
+
+    @setEvalBranchQuota(10_000);
+    const tag = std.meta.stringToEnum(BuiltinFunction.Tag, name) orelse return false;
+    const builtin = BuiltinFunction.fromTag(tag);
+    return comp.hasBuiltinFunction(builtin);
+}
+
+pub fn hasBuiltinFunction(comp: *const Compilation, builtin: BuiltinFunction) bool {
+    if (!target.builtinEnabled(comp.target, builtin.properties.target_set)) return false;
+
+    switch (builtin.properties.language) {
+        .all_languages => return true,
+        .all_ms_languages => return comp.langopts.emulate == .msvc,
+        .gnu_lang, .all_gnu_languages => return comp.langopts.standard.isGNU(),
+    }
+}
+
 pub const renderErrors = Diagnostics.render;
-
-pub fn isTlsSupported(comp: *Compilation) bool {
-    if (comp.target.isDarwin()) {
-        var supported = false;
-        switch (comp.target.os.tag) {
-            .macos => supported = !(comp.target.os.isAtLeast(.macos, .{ .major = 10, .minor = 7 }) orelse false),
-            else => {},
-        }
-        return supported;
-    }
-    return switch (comp.target.cpu.arch) {
-        .tce, .tcele, .bpfel, .bpfeb, .msp430, .nvptx, .nvptx64, .i386, .arm, .armeb, .thumb, .thumbeb => false,
-        else => true,
-    };
-}
-
-pub fn ignoreNonZeroSizedBitfieldTypeAlignment(comp: *const Compilation) bool {
-    switch (comp.target.cpu.arch) {
-        .avr => return true,
-        .arm => {
-            if (std.Target.arm.featureSetHas(comp.target.cpu.features, .has_v7)) {
-                switch (comp.target.os.tag) {
-                    .ios => return true,
-                    else => return false,
-                }
-            }
-        },
-        else => return false,
-    }
-    return false;
-}
-
-pub fn minZeroWidthBitfieldAlignment(comp: *const Compilation) ?u29 {
-    switch (comp.target.cpu.arch) {
-        .avr => return 8,
-        .arm => {
-            if (std.Target.arm.featureSetHas(comp.target.cpu.features, .has_v7)) {
-                switch (comp.target.os.tag) {
-                    .ios => return 32,
-                    else => return null,
-                }
-            } else return null;
-        },
-        else => return null,
-    }
-}
-
-pub fn unnamedFieldAffectsAlignment(comp: *const Compilation) bool {
-    switch (comp.target.cpu.arch) {
-        .aarch64 => {
-            if (comp.target.isDarwin() or comp.target.os.tag == .windows) return false;
-            return true;
-        },
-        .armeb => {
-            if (std.Target.arm.featureSetHas(comp.target.cpu.features, .has_v7)) {
-                if (std.Target.Abi.default(comp.target.cpu.arch, comp.target.os) == .eabi) return true;
-            }
-        },
-        .arm => return true,
-        .avr => return true,
-        .thumb => {
-            if (comp.target.os.tag == .windows) return false;
-            return true;
-        },
-        else => return false,
-    }
-    return false;
-}
-
-pub fn packAllEnums(comp: *const Compilation) bool {
-    return switch (comp.target.cpu.arch) {
-        .hexagon => true,
-        else => false,
-    };
-}
-
-/// Default alignment (in bytes) for __attribute__((aligned)) when no alignment is specified
-pub fn defaultAlignment(comp: *const Compilation) u29 {
-    switch (comp.target.cpu.arch) {
-        .avr => return 1,
-        .arm => if (comp.target.isAndroid() or comp.target.os.tag == .ios) return 16 else return 8,
-        .mips, .mipsel, .s390x, .sparc, .armeb, .thumbeb, .thumb => return 8,
-        else => return 16,
-    }
-}
-pub fn systemCompiler(comp: *const Compilation) LangOpts.Compiler {
-    const target = comp.target;
-    // andorid is linux but not gcc, so these checks go first
-    // the rest for documentation as fn returns .clang
-    if (target.isDarwin() or
-        target.isAndroid() or
-        target.isBSD() or
-        target.os.tag == .fuchsia or
-        target.os.tag == .solaris or
-        target.os.tag == .haiku or
-        target.cpu.arch == .hexagon)
-    {
-        return .clang;
-    }
-    if (target.os.tag == .uefi) return .msvc;
-    // this is before windows to grab WindowsGnu
-    if (target.abi.isGnu() or
-        target.os.tag == .linux)
-    {
-        return .gcc;
-    }
-    if (target.os.tag == .windows) {
-        return .msvc;
-    }
-    if (target.cpu.arch == .avr) return .gcc;
-    return .clang;
-}
 
 test "addSourceFromReader" {
     const Test = struct {
@@ -1120,69 +1169,6 @@ test "addSourceFromReader - exhaustive check for carriage return elimination" {
         }
     }
     try std.testing.expect(source_count == std.math.powi(usize, alen, alen) catch unreachable);
-}
-
-test "alignment functions - smoke test" {
-    var comp = Compilation.init(std.testing.allocator);
-    defer comp.deinit();
-
-    const x86 = std.Target.Cpu.Arch.x86_64;
-    comp.target.cpu = std.Target.Cpu.baseline(x86);
-    comp.target.os = std.Target.Os.Tag.defaultVersionRange(.linux, x86);
-    comp.target.abi = std.Target.Abi.default(x86, comp.target.os);
-
-    try std.testing.expect(comp.isTlsSupported());
-    try std.testing.expect(!comp.ignoreNonZeroSizedBitfieldTypeAlignment());
-    try std.testing.expect(comp.minZeroWidthBitfieldAlignment() == null);
-    try std.testing.expect(!comp.unnamedFieldAffectsAlignment());
-    try std.testing.expect(comp.defaultAlignment() == 16);
-    try std.testing.expect(!comp.packAllEnums());
-    try std.testing.expect(comp.systemCompiler() == .gcc);
-
-    const arm = std.Target.Cpu.Arch.arm;
-    comp.target.cpu = std.Target.Cpu.baseline(arm);
-    comp.target.os = std.Target.Os.Tag.defaultVersionRange(.ios, arm);
-    comp.target.abi = std.Target.Abi.default(arm, comp.target.os);
-
-    try std.testing.expect(!comp.isTlsSupported());
-    try std.testing.expect(comp.ignoreNonZeroSizedBitfieldTypeAlignment());
-    try std.testing.expectEqual(@as(?u29, 32), comp.minZeroWidthBitfieldAlignment());
-    try std.testing.expect(comp.unnamedFieldAffectsAlignment());
-    try std.testing.expect(comp.defaultAlignment() == 16);
-    try std.testing.expect(!comp.packAllEnums());
-    try std.testing.expect(comp.systemCompiler() == .clang);
-}
-
-test "target size/align tests" {
-    var comp = Compilation.init(std.testing.allocator);
-    defer comp.deinit();
-
-    const x86 = std.Target.Cpu.Arch.i386;
-    comp.target.cpu.arch = x86;
-    comp.target.cpu.model = &std.Target.x86.cpu.@"i586";
-    comp.target.os = std.Target.Os.Tag.defaultVersionRange(.linux, x86);
-    comp.target.abi = std.Target.Abi.gnu;
-
-    const tt: Type = .{
-        .specifier = .long_long,
-    };
-
-    try std.testing.expectEqual(@as(u64, 8), tt.sizeof(&comp).?);
-    try std.testing.expectEqual(@as(u64, 4), tt.alignof(&comp));
-
-    const arm = std.Target.Cpu.Arch.arm;
-    comp.target.cpu = std.Target.Cpu.Model.toCpu(&std.Target.arm.cpu.cortex_r4, arm);
-    comp.target.os = std.Target.Os.Tag.defaultVersionRange(.ios, arm);
-    comp.target.abi = std.Target.Abi.none;
-
-    const ct: Type = .{
-        .specifier = .char,
-    };
-
-    try std.testing.expectEqual(true, std.Target.arm.featureSetHas(comp.target.cpu.features, .has_v7));
-    try std.testing.expectEqual(@as(u64, 1), ct.sizeof(&comp).?);
-    try std.testing.expectEqual(@as(u64, 1), ct.alignof(&comp));
-    try std.testing.expectEqual(true, comp.ignoreNonZeroSizedBitfieldTypeAlignment());
 }
 
 test "ignore BOM at beginning of file" {

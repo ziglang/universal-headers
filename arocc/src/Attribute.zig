@@ -1,6 +1,7 @@
 const std = @import("std");
 const mem = std.mem;
 const ZigType = std.builtin.Type;
+const CallingConvention = @import("lib.zig").CallingConvention;
 const Compilation = @import("Compilation.zig");
 const Diagnostics = @import("Diagnostics.zig");
 const Parser = @import("Parser.zig");
@@ -45,12 +46,14 @@ pub const ArgumentType = enum {
     float,
     array,
     expression,
+    nullptr_t,
 
     pub fn toString(self: ArgumentType) []const u8 {
         return switch (self) {
             .string => "a string",
             .identifier => "an identifier",
             .int, .alignment => "an integer constant",
+            .nullptr_t => "nullptr",
             .float => "a floating point number",
             .array => "an array",
             .expression => "an expression",
@@ -63,6 +66,7 @@ pub const ArgumentType = enum {
             Identifier => .identifier,
             u32 => .int,
             Alignment => .alignment,
+            CallingConvention => .identifier,
             else => switch (@typeInfo(T)) {
                 .Enum => if (T.opts.enum_kind == .string) .string else .identifier,
                 else => unreachable,
@@ -77,6 +81,7 @@ pub const ArgumentType = enum {
             .unavailable => .expression,
             .float => .float,
             .array => .array,
+            .nullptr_t => .nullptr_t,
         };
     }
 };
@@ -92,7 +97,7 @@ pub fn requiredArgCount(attr: Tag) u32 {
             var needed = 0;
             const fields = getArguments(@field(attributes, @tagName(tag)));
             for (fields) |arg_field| {
-                if (!mem.eql(u8, arg_field.name, "__name_tok") and @typeInfo(arg_field.field_type) != .Optional) needed += 1;
+                if (!mem.eql(u8, arg_field.name, "__name_tok") and @typeInfo(arg_field.type) != .Optional) needed += 1;
             }
             return needed;
         },
@@ -126,11 +131,12 @@ pub const Formatting = struct {
     /// use double quotes
     fn quoteChar(attr: Tag) []const u8 {
         switch (attr) {
+            .calling_convention => unreachable,
             inline else => |tag| {
                 const fields = getArguments(@field(attributes, @tagName(tag)));
 
                 if (fields.len == 0) unreachable;
-                const Unwrapped = UnwrapOptional(fields[0].field_type);
+                const Unwrapped = UnwrapOptional(fields[0].type);
                 if (@typeInfo(Unwrapped) != .Enum) unreachable;
 
                 return if (Unwrapped.opts.enum_kind == .identifier) "'" else "\"";
@@ -142,11 +148,12 @@ pub const Formatting = struct {
     /// choices for the string or identifier enum of the first field of the Args of `attr`.
     pub fn choices(attr: Tag) []const u8 {
         switch (attr) {
+            .calling_convention => unreachable,
             inline else => |tag| {
                 const fields = getArguments(@field(attributes, @tagName(tag)));
 
                 if (fields.len == 0) unreachable;
-                const Unwrapped = UnwrapOptional(fields[0].field_type);
+                const Unwrapped = UnwrapOptional(fields[0].type);
                 if (@typeInfo(Unwrapped) != .Enum) unreachable;
 
                 const enum_fields = @typeInfo(Unwrapped).Enum.fields;
@@ -166,11 +173,12 @@ pub const Formatting = struct {
 /// Checks if the first argument (if it exists) is an identifier enum
 pub fn wantsIdentEnum(attr: Tag) bool {
     switch (attr) {
+        .calling_convention => return false,
         inline else => |tag| {
             const fields = getArguments(@field(attributes, @tagName(tag)));
 
             if (fields.len == 0) return false;
-            const Unwrapped = UnwrapOptional(fields[0].field_type);
+            const Unwrapped = UnwrapOptional(fields[0].type);
             if (@typeInfo(Unwrapped) != .Enum) return false;
 
             return Unwrapped.opts.enum_kind == .identifier;
@@ -183,7 +191,7 @@ pub fn diagnoseIdent(attr: Tag, arguments: *Arguments, ident: []const u8) ?Diagn
         inline else => |tag| {
             const fields = getArguments(@field(attributes, @tagName(tag)));
             if (fields.len == 0) unreachable;
-            const Unwrapped = UnwrapOptional(fields[0].field_type);
+            const Unwrapped = UnwrapOptional(fields[0].type);
             if (@typeInfo(Unwrapped) != .Enum) unreachable;
             if (std.meta.stringToEnum(Unwrapped, normalize(ident))) |enum_val| {
                 @field(@field(arguments, @tagName(tag)), fields[0].name) = enum_val;
@@ -204,7 +212,7 @@ pub fn wantsAlignment(attr: Tag, idx: usize) bool {
             if (fields.len == 0) return false;
 
             return switch (idx) {
-                inline 0...fields.len - 1 => |i| UnwrapOptional(fields[i].field_type) == Alignment,
+                inline 0...fields.len - 1 => |i| UnwrapOptional(fields[i].type) == Alignment,
                 else => false,
             };
         },
@@ -219,7 +227,7 @@ pub fn diagnoseAlignment(attr: Tag, arguments: *Arguments, arg_idx: u32, val: Va
 
             switch (arg_idx) {
                 inline 0...arg_fields.len - 1 => |arg_i| {
-                    if (UnwrapOptional(arg_fields[arg_i].field_type) != Alignment) unreachable;
+                    if (UnwrapOptional(arg_fields[arg_i].type) != Alignment) unreachable;
 
                     if (val.tag != .int) return Diagnostics.Message{ .tag = .alignas_unavailable };
                     if (val.compare(.lt, Value.int(0), ty, comp)) {
@@ -259,7 +267,7 @@ fn diagnoseField(
             if (wanted == []const u8) {
                 @field(@field(arguments, decl.name), field.name) = bytes;
                 return null;
-            } else if (@typeInfo(wanted) == .Enum and wanted.opts.enum_kind == .string) {
+            } else if (@typeInfo(wanted) == .Enum and @hasDecl(wanted, "opts") and wanted.opts.enum_kind == .string) {
                 if (std.meta.stringToEnum(wanted, bytes)) |enum_val| {
                     @field(@field(arguments, decl.name), field.name) = enum_val;
                     return null;
@@ -297,7 +305,7 @@ pub fn diagnose(attr: Tag, arguments: *Arguments, arg_idx: u32, val: Value, node
             const arg_fields = getArguments(@field(attributes, decl.name));
             switch (arg_idx) {
                 inline 0...arg_fields.len - 1 => |arg_i| {
-                    return diagnoseField(decl, arg_fields[arg_i], UnwrapOptional(arg_fields[arg_i].field_type), arguments, val, node);
+                    return diagnoseField(decl, arg_fields[arg_i], UnwrapOptional(arg_fields[arg_i].type), arguments, val, node);
                 },
                 else => unreachable,
             }
@@ -867,6 +875,11 @@ const attributes = struct {
             name: []const u8,
         };
     };
+    const calling_convention = struct {
+        const Args = struct {
+            cc: CallingConvention,
+        };
+    };
 };
 
 pub const Tag = std.meta.DeclEnum(attributes);
@@ -877,7 +890,7 @@ pub const Arguments = blk: {
     inline for (decls) |decl, i| {
         union_fields[i] = .{
             .name = decl.name,
-            .field_type = if (@hasDecl(@field(attributes, decl.name), "Args")) @field(attributes, decl.name).Args else void,
+            .type = if (@hasDecl(@field(attributes, decl.name), "Args")) @field(attributes, decl.name).Args else void,
             .alignment = 0,
         };
     }
@@ -1139,6 +1152,17 @@ pub fn applyFunctionAttributes(p: *Parser, ty: Type, attr_buf_start: usize) !Typ
         },
         .aligned => try attr.applyAligned(p, base_ty, null),
         .format => try attr.applyFormat(p, base_ty),
+        .calling_convention => switch (attr.args.calling_convention.cc) {
+            .C => continue,
+            .stdcall, .thiscall => switch (p.comp.target.cpu.arch) {
+                .x86 => try p.attr_application_buf.append(p.gpa, attr),
+                else => try p.errStr(.callconv_not_supported, toks[i], p.tok_ids[toks[i]].lexeme().?),
+            },
+            .vectorcall => switch (p.comp.target.cpu.arch) {
+                .x86, .aarch64, .aarch64_be, .aarch64_32 => try p.attr_application_buf.append(p.gpa, attr),
+                else => try p.errStr(.callconv_not_supported, toks[i], p.tok_ids[toks[i]].lexeme().?),
+            },
+        },
         .access,
         .alloc_align,
         .alloc_size,
@@ -1281,8 +1305,10 @@ fn applyTransparentUnion(attr: Attribute, p: *Parser, tok: TokenIndex, ty: Type)
 }
 
 fn applyVectorSize(attr: Attribute, p: *Parser, tok: TokenIndex, ty: *Type) !void {
-    if (!ty.isInt() and (!ty.isFloat() or !ty.isReal())) {
-        return p.errStr(.invalid_vec_elem_ty, tok, try p.typeStr(ty.*));
+    if (!(ty.isInt() or ty.isFloat()) or !ty.isReal()) {
+        const orig_ty = try p.typeStr(ty.*);
+        ty.* = Type.invalid;
+        return p.errStr(.invalid_vec_elem_ty, tok, orig_ty);
     }
     const vec_bytes = attr.args.vector_size.bytes;
     const ty_size = ty.sizeof(p.comp).?;
