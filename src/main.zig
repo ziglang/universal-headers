@@ -134,6 +134,22 @@ const Symbol = struct {
     clauses: Clauses,
     identifier: []const u8,
     contents: []const u8,
+
+    pub fn format(value: Symbol, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+        _ = fmt;
+        _ = options;
+        try writer.print("Symbol '{s}'\n", .{value.identifier});
+        try writer.print("  contents: {s}\n", .{value.contents});
+        for (value.clauses.conjunctives) |conj| {
+            try writer.writeAll("  AND\n");
+            try writer.writeAll("    OR\n");
+            for (conj) |def| switch (def.define) {
+                .def => try writer.print("      {s}\n", .{def.name}),
+                .undef => try writer.print("      !{s}\n", .{def.name}),
+                .string => |s| try writer.print("      {s} == {s}\n", .{ def.name, s }),
+            };
+        }
+    }
 };
 
 pub fn main() !void {
@@ -194,13 +210,13 @@ pub fn main() !void {
         }
     }
 
-    std.debug.print("found: {d} unique headers across {d} targets\n", .{
-        header_table.count(), inputs.len,
-    });
+    // std.debug.print("found: {d} unique headers across {d} targets\n", .{
+    //     header_table.count(), inputs.len,
+    // });
 
     var it = header_table.iterator();
     while (it.next()) |entry| {
-        std.debug.print("merge '{s}'...\n", .{entry.key_ptr.*});
+        // std.debug.print("merge '{s}'...\n", .{entry.key_ptr.*});
         var merger: Merger = .{
             .arena = arena,
             .h_path = entry.key_ptr.*,
@@ -336,9 +352,62 @@ const Merger = struct {
             try addSymbolsFromHeader(m, header);
         }
 
-        std.debug.print("{s} symbols superposition set size {d}\n", .{
-            m.h_path, m.all_symbols.items.len,
-        });
+        var symbols_by_name = std.StringHashMap(std.ArrayList(Symbol)).init(m.arena);
+        for (m.all_symbols.items) |symbol| {
+            const gop = try symbols_by_name.getOrPut(symbol.identifier);
+            if (!gop.found_existing) {
+                gop.value_ptr.* = std.ArrayList(Symbol).init(m.arena);
+            }
+            try gop.value_ptr.append(symbol);
+        }
+        {
+            var it = symbols_by_name.iterator();
+            while (it.next()) |entry| {
+                const first = entry.value_ptr.items[0];
+                std.debug.print("Symbol '{s}'\n", .{first.identifier});
+                std.debug.print("  contents: {s}\n", .{first.contents});
+                std.debug.print("  SOPOS:\n", .{});
+
+                var encoding = std.StringArrayHashMap(void).init(m.arena);
+                for (entry.value_ptr.items) |symbol, i| {
+                    std.debug.print("    ", .{});
+                    for (symbol.clauses.conjunctives) |conj| {
+                        for (conj) |def, j| {
+                            const name = switch (def.define) {
+                                .def, .undef => try std.fmt.allocPrint(m.arena, "{s}", .{def.name}),
+                                .string => |s| try std.fmt.allocPrint(m.arena, "{s} == {s}", .{ def.name, s }),
+                            };
+                            try encoding.put(name, {});
+                            const enc = encoding.getIndex(name).?;
+                            std.debug.print("(", .{});
+                            switch (def.define) {
+                                .def, .string => std.debug.print("{d}", .{enc}),
+                                .undef => std.debug.print("!{d}", .{enc}),
+                            }
+                            if (conj.len > 1 and j < conj.len - 1) {
+                                std.debug.print(" + ", .{});
+                            } else {
+                                std.debug.print(")", .{});
+                            }
+                        }
+                    }
+                    if (entry.value_ptr.items.len > 1 and i < entry.value_ptr.items.len - 1) {
+                        std.debug.print(" +", .{});
+                    }
+                    std.debug.print("\n", .{});
+                }
+
+                std.debug.print("  legend:\n", .{});
+                for (encoding.keys()) |name, i| {
+                    std.debug.print("    {d} => {s}\n", .{ i, name });
+                }
+                std.debug.print("\n\n", .{});
+            }
+        }
+
+        // std.debug.print("{s} symbols superposition set size {d}\n", .{
+        //     m.h_path, m.all_symbols.items.len,
+        // });
 
         // Score each define to find out which ones apply to the most symbols.
         var define_scores = std.StringHashMap(u32).init(m.arena);
@@ -410,7 +479,7 @@ const Merger = struct {
     fn addSymbolsFromHeader(m: *Merger, header: Header) !void {
         if (!mem.eql(u8, m.h_path, "sys/appleapiopts.h")) return; // TODO remove this
 
-        std.debug.print("iterate: {s}/{s}\n", .{ header.input.path, m.h_path });
+        // std.debug.print("iterate: {s}/{s}\n", .{ header.input.path, m.h_path });
 
         // We will repeatedly invoke Aro, bailing out when we see a dependency on
         // an unrecognized macro. In such case, we add it to the stack, and invoke
@@ -429,13 +498,13 @@ const Merger = struct {
 
         while (invoke_stack.popOrNull()) |macro_set| {
             {
-                std.debug.print("invoke with inspectable macros:", .{});
-                var it = macro_set.iterator();
-                while (it.next()) |entry| {
-                    const name = entry.key_ptr.*;
-                    std.debug.print(" {s}", .{name});
-                }
-                std.debug.print("\n", .{});
+                // std.debug.print("invoke with inspectable macros:", .{});
+                // var it = macro_set.iterator();
+                // while (it.next()) |entry| {
+                //     const name = entry.key_ptr.*;
+                //     std.debug.print(" {s}", .{name});
+                // }
+                // std.debug.print("\n", .{});
             }
 
             var comp = arocc.Compilation.init(m.arena);
@@ -487,9 +556,9 @@ const Merger = struct {
             const eof = pp.preprocess(source) catch |err| switch (err) {
                 error.UnexpectedMacro => {
                     const macro_name = try m.arena.dupe(u8, pp.unexpected_macro);
-                    std.debug.print("branch on '{s}', adding both ifdef and ifndef to stack\n", .{
-                        macro_name,
-                    });
+                    // std.debug.print("branch on '{s}', adding both ifdef and ifndef to stack\n", .{
+                    //     macro_name,
+                    // });
                     var def_case = try macro_set.clone(comp.gpa);
                     var undef_case = try macro_set.clone(comp.gpa);
                     try def_case.put(comp.gpa, macro_name, .def);
@@ -532,7 +601,7 @@ const Merger = struct {
                         .undef => {},
                     }
                 }
-                std.debug.print("found macro: '{s}': '{s}'\n", .{ name, body });
+                // std.debug.print("found macro: '{s}': '{s}'\n", .{ name, body });
                 try m.all_symbols.append(m.arena, .{
                     .clauses = try definesToClauses(m.arena, macro_set),
                     .identifier = try m.arena.dupe(u8, name),
