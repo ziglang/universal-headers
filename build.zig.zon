@@ -3,10 +3,6 @@
     .version = "0.0.1",
 
     .dependencies = .{
-        .@"libespresso-zig" = .{
-            .url = "https://github.com/kubkon/espresso-zig/archive/7c297c2e6aac918f34ca848fad9a7768ca805e28.tar.gz",
-            .hash = "1220500cc1f6d65a26aa466575413ea0429a1a31414d2db0dd48648f3fe7bbfea85c",
-        },
         .libespresso = .{
             .url = "https://github.com/kubkon/espresso/archive/44d1b720d12a4991094e3efaba3785b522eb3494.tar.gz",
             .hash = "122061c2d61c3c4013a03c20803118ef938f3a6869b10f65c0b6fcc37e31216fe2d6",

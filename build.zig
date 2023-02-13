@@ -4,10 +4,6 @@ pub fn build(b: *std.build.Builder) void {
     const target = b.standardTargetOptions(.{});
     const mode = b.standardOptimizeOption(.{});
 
-    const libespresso_zig = b.dependency("libespresso-zig", .{
-        .target = target,
-        .optimize = mode,
-    });
     const libespresso = b.dependency("libespresso", .{
         .target = target,
         .optimize = mode,
@@ -23,7 +19,6 @@ pub fn build(b: *std.build.Builder) void {
         .target = target,
         .optimize = mode,
     });
-    exe.addModule("espresso", libespresso_zig.module("espresso"));
     exe.addAnonymousModule("arocc", .{
         .source_file = .{ .path = "arocc/src/lib.zig" },
     });

@@ -6,7 +6,7 @@ const Target = std.Target;
 const assert = std.debug.assert;
 
 const arocc = @import("arocc");
-const espresso = @import("espresso");
+const espresso = @import("espresso.zig");
 
 const Input = struct {
     path: []const u8,
@@ -236,103 +236,7 @@ pub fn main() !void {
 
         var bw = std.io.bufferedWriter(out_file.writer());
         const w = bw.writer();
-
-        for (merger.all_symbols.items) |symbol| {
-            try w.print("#if ", .{});
-            for (symbol.clauses.conjunctives) |conjunctive, conjunctive_i| {
-                if (conjunctive_i != 0) try w.writeAll(" && ");
-                if (conjunctive.len > 1) {
-                    try w.writeAll("(");
-                }
-                for (conjunctive) |named_define, define_i| {
-                    if (define_i != 0) try w.writeAll(" || ");
-                    switch (named_define.define) {
-                        .def => {
-                            try w.print("defined({s})", .{named_define.name});
-                        },
-                        .undef => {
-                            try w.print("!defined({s})", .{named_define.name});
-                        },
-                        .string => |s| {
-                            try w.print("{s} == {s}", .{ named_define.name, s });
-                        },
-                    }
-                }
-                if (conjunctive.len > 1) {
-                    try w.writeAll(")");
-                }
-            }
-            try w.print("\n", .{});
-
-            if (symbol.contents.len == 0) {
-                try w.print("#define {s}\n", .{symbol.identifier});
-            } else {
-                try w.print("#define {s} {s}\n", .{ symbol.identifier, symbol.contents });
-            }
-
-            try w.print("#endif\n", .{});
-        }
-
-        //const State = std.StringHashMapUnmanaged(Define);
-        //var state_stack = std.ArrayList(Clauses).init(arena);
-        //try state_stack.append(.{});
-
-        //for (merger.all_symbols.items) |symbol| {
-        //    // Pop until we have no conflicts with the current state.
-        //    search: while (true) {
-        //        const top = &state_stack.items[state_stack.items.len - 1];
-        //        for (symbol.clauses) |conjunction| {
-        //            for (conjunction) |sym_define| {
-        //                if (top.get(sym_define.name)) |cur_define| {
-        //                    if (!cur_define.eql(sym_define)) {
-        //                        try w.writeAll("#endif\n");
-        //                        _ = state_stack.pop();
-        //                        continue :search;
-        //                    }
-        //                }
-        //            }
-        //        }
-        //        break;
-        //    }
-
-        //    // Push until all constraints are satisfied.
-        //    cond: while (true) {
-        //        const top = &state_stack.items[state_stack.items.len - 1];
-        //        for (symbol.clauses) |conjunction| {
-        //            const define_name = define_names[i];
-        //            if (top.contains(define_name)) continue;
-
-        //            var new_state = try top.clone(arena);
-        //            try new_state.put(arena, define_name, define_value);
-        //            try state_stack.append(new_state);
-
-        //            switch (define_value) {
-        //                .def => {
-        //                    try w.print("#ifdef {s}\n", .{define_name});
-        //                },
-        //                .undef => {
-        //                    try w.print("#ifndef {s}\n", .{define_name});
-        //                },
-        //                .string => |s| {
-        //                    try w.print("#if {s} == {s}\n", .{ define_name, s });
-        //                },
-        //            }
-        //            continue :cond;
-        //        }
-        //        break;
-        //    }
-
-        //    if (symbol.contents.len == 0) {
-        //        try w.print("#define {s}\n", .{symbol.identifier});
-        //    } else {
-        //        try w.print("#define {s} {s}\n", .{ symbol.identifier, symbol.contents });
-        //    }
-        //}
-
-        //for (state_stack.items[1..]) |_| {
-        //    try w.writeAll("#endif\n");
-        //}
-
+        try merger.minimize(w);
         try bw.flush();
     }
 }
@@ -352,7 +256,9 @@ const Merger = struct {
         for (m.headers) |header| {
             try addSymbolsFromHeader(m, header);
         }
+    }
 
+    fn minimize(m: *Merger, writer: anytype) !void {
         var symbols_by_name = std.StringHashMap(std.ArrayList(Symbol)).init(m.arena);
         for (m.all_symbols.items) |symbol| {
             const gop = try symbols_by_name.getOrPut(symbol.identifier);
@@ -361,168 +267,114 @@ const Merger = struct {
             }
             try gop.value_ptr.append(symbol);
         }
-        {
-            var it = symbols_by_name.iterator();
-            while (it.next()) |entry| {
-                const first = entry.value_ptr.items[0];
-                std.debug.print("Symbol '{s}'\n", .{first.identifier});
-                std.debug.print("  contents: {s}\n", .{first.contents});
 
-                var in_labels = std.ArrayList([]const u8).init(m.arena);
-                const out_label = "z";
+        var it = symbols_by_name.iterator();
+        while (it.next()) |entry| {
+            const first = entry.value_ptr.items[0];
+            var in_labels = std.ArrayList([]const u8).init(m.arena);
+            const out_label = "z";
 
-                var start: u8 = 'a';
-                var encoding = std.StringArrayHashMap(u16).init(m.arena);
-                for (entry.value_ptr.items) |symbol| {
-                    for (symbol.clauses.conjunctives) |conj| {
-                        for (conj) |def| {
-                            const name = switch (def.define) {
-                                .def, .undef => try std.fmt.allocPrint(m.arena, "{s}", .{def.name}),
-                                .string => |s| try std.fmt.allocPrint(m.arena, "{s} == {s}", .{ def.name, s }),
+            var start: u8 = 'a';
+            var encoding = std.StringArrayHashMap(struct {
+                index: u16,
+                def: NamedDefine,
+            }).init(m.arena);
+            for (entry.value_ptr.items) |symbol| {
+                for (symbol.clauses.conjunctives) |conj| {
+                    for (conj) |def| {
+                        const name = switch (def.define) {
+                            .def, .undef => try std.fmt.allocPrint(m.arena, "{s}", .{def.name}),
+                            .string => |s| try std.fmt.allocPrint(m.arena, "{s} == {s}", .{ def.name, s }),
+                        };
+                        const gop = try encoding.getOrPut(name);
+                        if (!gop.found_existing) {
+                            const index = @intCast(u16, in_labels.items.len);
+                            var buf: [1]u8 = .{start};
+                            try in_labels.append(try m.arena.dupe(u8, &buf));
+                            gop.value_ptr.* = .{
+                                .index = index,
+                                .def = def,
                             };
-                            const gop = try encoding.getOrPut(name);
-                            if (!gop.found_existing) {
-                                const value = @intCast(u16, in_labels.items.len);
-                                var buf: [1]u8 = .{start};
-                                try in_labels.append(try m.arena.dupe(u8, &buf));
-                                gop.value_ptr.* = value;
-                                start += 1;
-                            }
+                            start += 1;
                         }
                     }
                 }
-
-                var encoded_input = std.ArrayList(u8).init(m.arena);
-                const in_writer = encoded_input.writer();
-                try in_writer.writeAll("INORDER = ");
-                for (in_labels.items) |label| {
-                    try in_writer.print("{s} ", .{label});
-                }
-                try in_writer.writeAll(";\n");
-                try in_writer.print("OUTORDER = {s};\n", .{out_label});
-
-                try in_writer.print("{s} = ", .{out_label});
-                for (entry.value_ptr.items) |symbol, i| {
-                    for (symbol.clauses.conjunctives) |conj, k| {
-                        for (conj) |def, j| {
-                            const name = switch (def.define) {
-                                .def, .undef => try std.fmt.allocPrint(m.arena, "{s}", .{def.name}),
-                                .string => |s| try std.fmt.allocPrint(m.arena, "{s} == {s}", .{ def.name, s }),
-                            };
-                            const index = encoding.get(name).?;
-                            const enc = in_labels.items[index];
-                            try in_writer.print("(", .{});
-                            switch (def.define) {
-                                .def, .string => try in_writer.print("{s}", .{enc}),
-                                .undef => try in_writer.print("!{s}", .{enc}),
-                            }
-                            if (conj.len > 1 and j < conj.len - 1) {
-                                try in_writer.print(" | ", .{});
-                            } else {
-                                try in_writer.print(")", .{});
-                            }
-                        }
-
-                        if (symbol.clauses.conjunctives.len > 1 and k < symbol.clauses.conjunctives.len - 1) {
-                            try in_writer.print(" & ", .{});
-                        }
-                    }
-                    if (entry.value_ptr.items.len > 1 and i < entry.value_ptr.items.len - 1) {
-                        try in_writer.print(" | ", .{});
-                    }
-                }
-                try in_writer.writeAll(";\n");
-                try in_writer.writeByte(0);
-
-                std.debug.print("\n{s}\n", .{encoded_input.items});
-
-                var tt = std.ArrayList(u8).init(m.arena);
-                try espresso.eqnToTruthTable(encoded_input.items[0 .. encoded_input.items.len - 1 :0], tt.writer());
-                try tt.append(0);
-
-                const pla = try espresso.PLA.openMem(tt.items[0 .. tt.items.len - 1 :0]);
-                defer pla.deinit();
-                const cost = try pla.minimize();
-                _ = cost;
-
-                var encoded_out = std.ArrayList(u8).init(m.arena);
-                try pla.writeSolution(in_labels.items, out_label, encoded_out.writer());
-
-                std.debug.print("{s}\n", .{encoded_out.items});
-
-                break;
             }
+
+            var encoded_input = std.ArrayList(u8).init(m.arena);
+            const in_writer = encoded_input.writer();
+            try in_writer.writeAll("INORDER = ");
+            for (in_labels.items) |label| {
+                try in_writer.print("{s} ", .{label});
+            }
+            try in_writer.writeAll(";\n");
+            try in_writer.print("OUTORDER = {s};\n", .{out_label});
+
+            try in_writer.print("{s} = ", .{out_label});
+            for (entry.value_ptr.items) |symbol, i| {
+                for (symbol.clauses.conjunctives) |conj, k| {
+                    for (conj) |def, j| {
+                        const name = switch (def.define) {
+                            .def, .undef => try std.fmt.allocPrint(m.arena, "{s}", .{def.name}),
+                            .string => |s| try std.fmt.allocPrint(m.arena, "{s} == {s}", .{ def.name, s }),
+                        };
+                        const index = encoding.get(name).?.index;
+                        const enc = in_labels.items[index];
+                        try in_writer.print("(", .{});
+                        switch (def.define) {
+                            .def, .string => try in_writer.print("{s}", .{enc}),
+                            .undef => try in_writer.print("!{s}", .{enc}),
+                        }
+                        if (conj.len > 1 and j < conj.len - 1) {
+                            try in_writer.print(" | ", .{});
+                        } else {
+                            try in_writer.print(")", .{});
+                        }
+                    }
+
+                    if (symbol.clauses.conjunctives.len > 1 and k < symbol.clauses.conjunctives.len - 1) {
+                        try in_writer.print(" & ", .{});
+                    }
+                }
+                if (entry.value_ptr.items.len > 1 and i < entry.value_ptr.items.len - 1) {
+                    try in_writer.print(" | ", .{});
+                }
+            }
+            try in_writer.writeAll(";\n");
+            try in_writer.writeByte(0);
+
+            var tt = std.ArrayList(u8).init(m.arena);
+            try espresso.eqnToTruthTable(encoded_input.items[0 .. encoded_input.items.len - 1 :0], tt.writer());
+            try tt.append(0);
+
+            const pla = try espresso.PLA.openMem(tt.items[0 .. tt.items.len - 1 :0]);
+            defer pla.deinit();
+            const cost = try pla.minimize();
+            _ = cost;
+
+            try writer.print("#if ", .{});
+
+            var output_labels = std.ArrayList([]const u8).init(m.arena);
+            for (encoding.keys()) |_, i| {
+                const def = encoding.values()[i].def;
+                const name = switch (def.define) {
+                    .def, .undef => try std.fmt.allocPrint(m.arena, "defined({s})", .{def.name}),
+                    .string => |s| try std.fmt.allocPrint(m.arena, "{s} == {s}", .{ def.name, s }),
+                };
+                try output_labels.append(name);
+            }
+
+            try pla.writeSolution(output_labels.items, writer);
+            try writer.writeByte('\n');
+
+            if (first.contents.len == 0) {
+                try writer.print("#define {s}\n", .{first.identifier});
+            } else {
+                try writer.print("#define {s} {s}\n", .{ first.identifier, first.contents });
+            }
+
+            try writer.print("#endif\n", .{});
         }
-
-        // std.debug.print("{s} symbols superposition set size {d}\n", .{
-        //     m.h_path, m.all_symbols.items.len,
-        // });
-
-        // Score each define to find out which ones apply to the most symbols.
-        var define_scores = std.StringHashMap(u32).init(m.arena);
-        for (m.all_symbols.items) |symbol| {
-            for (symbol.clauses.conjunctives) |conjunctive| {
-                // only score the first OR
-                const name = conjunctive[0].name;
-                const gop = try define_scores.getOrPut(name);
-                if (!gop.found_existing) {
-                    gop.value_ptr.* = 0;
-                }
-                gop.value_ptr.* += 1;
-            }
-        }
-
-        // Each symbol from the list needs to be accounted for. First we try
-        // to prune symbols.
-
-        // Now each symbol's defines table needs to be sorted according to these scores.
-        //for (m.all_symbols.items) |*symbol| {
-        //    for (symbol.clauses) |*defines| {
-        //        defines.sort(struct {
-        //            define_scores: *std.StringHashMap(u32),
-        //            names: []const []const u8,
-
-        //            pub fn lessThan(ctx: @This(), a_index: usize, b_index: usize) bool {
-        //                const a = ctx.define_scores.get(ctx.names[a_index]).?;
-        //                const b = ctx.define_scores.get(ctx.names[b_index]).?;
-        //                return b < a;
-        //            }
-        //        }{
-        //            .define_scores = &define_scores,
-        //            .names = defines.keys(),
-        //        });
-        //    }
-        //}
-
-        std.sort.sort(Symbol, m.all_symbols.items, &define_scores, struct {
-            pub fn lessThan(context: *std.StringHashMap(u32), lhs: Symbol, rhs: Symbol) bool {
-                // TODO notice symbol dependencies, prioritize those
-
-                // Now we sort by the defines that apply to the most symbols.
-                const lhs_conjunctives = lhs.clauses.conjunctives;
-                const rhs_conjunctives = rhs.clauses.conjunctives;
-                for (lhs_conjunctives[0..@min(lhs_conjunctives.len, rhs_conjunctives.len)]) |lhs_conjunctive, i| {
-                    const lhs_name = lhs_conjunctive[0].name;
-                    const rhs_name = rhs_conjunctives[i][0].name;
-                    if (mem.eql(u8, lhs_name, rhs_name)) {
-                        continue;
-                    }
-                    const lhs_score = context.get(lhs_name).?;
-                    const rhs_score = context.get(rhs_name).?;
-                    if (rhs_score < lhs_score) {
-                        return true;
-                    }
-                    return mem.lessThan(u8, lhs_name, rhs_name);
-                }
-
-                if (lhs_conjunctives.len < rhs_conjunctives.len) {
-                    return true;
-                }
-
-                // Tiebreaker is the identifier.
-                return mem.lessThan(u8, lhs.identifier, rhs.identifier);
-            }
-        }.lessThan);
     }
 
     fn addSymbolsFromHeader(m: *Merger, header: Header) !void {
