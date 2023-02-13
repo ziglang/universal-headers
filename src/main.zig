@@ -6,6 +6,7 @@ const Target = std.Target;
 const assert = std.debug.assert;
 
 const arocc = @import("arocc");
+const espresso = @import("espresso");
 
 const Input = struct {
     path: []const u8,
@@ -366,42 +367,90 @@ const Merger = struct {
                 const first = entry.value_ptr.items[0];
                 std.debug.print("Symbol '{s}'\n", .{first.identifier});
                 std.debug.print("  contents: {s}\n", .{first.contents});
-                std.debug.print("  SOPOS:\n", .{});
 
-                var encoding = std.StringArrayHashMap(void).init(m.arena);
-                for (entry.value_ptr.items) |symbol, i| {
-                    std.debug.print("    ", .{});
+                var in_labels = std.ArrayList([]const u8).init(m.arena);
+                const out_label = "z";
+
+                var start: u8 = 'a';
+                var encoding = std.StringArrayHashMap(u16).init(m.arena);
+                for (entry.value_ptr.items) |symbol| {
                     for (symbol.clauses.conjunctives) |conj| {
+                        for (conj) |def| {
+                            const name = switch (def.define) {
+                                .def, .undef => try std.fmt.allocPrint(m.arena, "{s}", .{def.name}),
+                                .string => |s| try std.fmt.allocPrint(m.arena, "{s} == {s}", .{ def.name, s }),
+                            };
+                            const gop = try encoding.getOrPut(name);
+                            if (!gop.found_existing) {
+                                const value = @intCast(u16, in_labels.items.len);
+                                var buf: [1]u8 = .{start};
+                                try in_labels.append(try m.arena.dupe(u8, &buf));
+                                gop.value_ptr.* = value;
+                                start += 1;
+                            }
+                        }
+                    }
+                }
+
+                var encoded_input = std.ArrayList(u8).init(m.arena);
+                const in_writer = encoded_input.writer();
+                try in_writer.writeAll("INORDER = ");
+                for (in_labels.items) |label| {
+                    try in_writer.print("{s} ", .{label});
+                }
+                try in_writer.writeAll(";\n");
+                try in_writer.print("OUTORDER = {s};\n", .{out_label});
+
+                try in_writer.print("{s} = ", .{out_label});
+                for (entry.value_ptr.items) |symbol, i| {
+                    for (symbol.clauses.conjunctives) |conj, k| {
                         for (conj) |def, j| {
                             const name = switch (def.define) {
                                 .def, .undef => try std.fmt.allocPrint(m.arena, "{s}", .{def.name}),
                                 .string => |s| try std.fmt.allocPrint(m.arena, "{s} == {s}", .{ def.name, s }),
                             };
-                            try encoding.put(name, {});
-                            const enc = encoding.getIndex(name).?;
-                            std.debug.print("(", .{});
+                            const index = encoding.get(name).?;
+                            const enc = in_labels.items[index];
+                            try in_writer.print("(", .{});
                             switch (def.define) {
-                                .def, .string => std.debug.print("{d}", .{enc}),
-                                .undef => std.debug.print("!{d}", .{enc}),
+                                .def, .string => try in_writer.print("{s}", .{enc}),
+                                .undef => try in_writer.print("!{s}", .{enc}),
                             }
                             if (conj.len > 1 and j < conj.len - 1) {
-                                std.debug.print(" + ", .{});
+                                try in_writer.print(" | ", .{});
                             } else {
-                                std.debug.print(")", .{});
+                                try in_writer.print(")", .{});
                             }
+                        }
+
+                        if (symbol.clauses.conjunctives.len > 1 and k < symbol.clauses.conjunctives.len - 1) {
+                            try in_writer.print(" & ", .{});
                         }
                     }
                     if (entry.value_ptr.items.len > 1 and i < entry.value_ptr.items.len - 1) {
-                        std.debug.print(" +", .{});
+                        try in_writer.print(" | ", .{});
                     }
-                    std.debug.print("\n", .{});
                 }
+                try in_writer.writeAll(";\n");
+                try in_writer.writeByte(0);
 
-                std.debug.print("  legend:\n", .{});
-                for (encoding.keys()) |name, i| {
-                    std.debug.print("    {d} => {s}\n", .{ i, name });
-                }
-                std.debug.print("\n\n", .{});
+                std.debug.print("\n{s}\n", .{encoded_input.items});
+
+                var tt = std.ArrayList(u8).init(m.arena);
+                try espresso.eqnToTruthTable(encoded_input.items[0 .. encoded_input.items.len - 1 :0], tt.writer());
+                try tt.append(0);
+
+                const pla = try espresso.PLA.openMem(tt.items[0 .. tt.items.len - 1 :0]);
+                defer pla.deinit();
+                const cost = try pla.minimize();
+                _ = cost;
+
+                var encoded_out = std.ArrayList(u8).init(m.arena);
+                try pla.writeSolution(in_labels.items, out_label, encoded_out.writer());
+
+                std.debug.print("{s}\n", .{encoded_out.items});
+
+                break;
             }
         }
 
