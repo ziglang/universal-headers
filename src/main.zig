@@ -274,7 +274,7 @@ const Merger = struct {
             var in_labels = std.ArrayList([]const u8).init(m.arena);
             const out_label = "z";
 
-            var start: u8 = 'a';
+            var start: u16 = 0;
             var encoding = std.StringArrayHashMap(struct {
                 index: u16,
                 def: NamedDefine,
@@ -289,8 +289,8 @@ const Merger = struct {
                         const gop = try encoding.getOrPut(name);
                         if (!gop.found_existing) {
                             const index = @intCast(u16, in_labels.items.len);
-                            var buf: [1]u8 = .{start};
-                            try in_labels.append(try m.arena.dupe(u8, &buf));
+                            const enc = try std.fmt.allocPrint(m.arena, "a_{d}", .{start});
+                            try in_labels.append(enc);
                             gop.value_ptr.* = .{
                                 .index = index,
                                 .def = def,
