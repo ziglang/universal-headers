@@ -211,13 +211,13 @@ pub fn main() !void {
         }
     }
 
-    // std.debug.print("found: {d} unique headers across {d} targets\n", .{
-    //     header_table.count(), inputs.len,
-    // });
+    std.debug.print("found: {d} unique headers across {d} targets\n", .{
+        header_table.count(), inputs.len,
+    });
 
     var it = header_table.iterator();
     while (it.next()) |entry| {
-        // std.debug.print("merge '{s}'...\n", .{entry.key_ptr.*});
+        std.debug.print("merge '{s}'...\n", .{entry.key_ptr.*});
         var merger: Merger = .{
             .arena = arena,
             .h_path = entry.key_ptr.*,
@@ -271,6 +271,9 @@ const Merger = struct {
         var it = symbols_by_name.iterator();
         while (it.next()) |entry| {
             const first = entry.value_ptr.items[0];
+
+            std.debug.print("minimizing boolean expression for symbol '{s}'\n", .{first.identifier});
+
             var in_labels = std.ArrayList([]const u8).init(m.arena);
             const out_label = "z";
 
@@ -380,7 +383,7 @@ const Merger = struct {
     fn addSymbolsFromHeader(m: *Merger, header: Header) !void {
         if (!mem.eql(u8, m.h_path, "sys/appleapiopts.h")) return; // TODO remove this
 
-        // std.debug.print("iterate: {s}/{s}\n", .{ header.input.path, m.h_path });
+        std.debug.print("iterate: {s}/{s}\n", .{ header.input.path, m.h_path });
 
         // We will repeatedly invoke Aro, bailing out when we see a dependency on
         // an unrecognized macro. In such case, we add it to the stack, and invoke
@@ -399,13 +402,13 @@ const Merger = struct {
 
         while (invoke_stack.popOrNull()) |macro_set| {
             {
-                // std.debug.print("invoke with inspectable macros:", .{});
-                // var it = macro_set.iterator();
-                // while (it.next()) |entry| {
-                //     const name = entry.key_ptr.*;
-                //     std.debug.print(" {s}", .{name});
-                // }
-                // std.debug.print("\n", .{});
+                std.debug.print("invoke with inspectable macros:", .{});
+                var it = macro_set.iterator();
+                while (it.next()) |entry| {
+                    const name = entry.key_ptr.*;
+                    std.debug.print(" {s}", .{name});
+                }
+                std.debug.print("\n", .{});
             }
 
             var comp = arocc.Compilation.init(m.arena);
@@ -457,9 +460,9 @@ const Merger = struct {
             const eof = pp.preprocess(source) catch |err| switch (err) {
                 error.UnexpectedMacro => {
                     const macro_name = try m.arena.dupe(u8, pp.unexpected_macro);
-                    // std.debug.print("branch on '{s}', adding both ifdef and ifndef to stack\n", .{
-                    //     macro_name,
-                    // });
+                    std.debug.print("branch on '{s}', adding both ifdef and ifndef to stack\n", .{
+                        macro_name,
+                    });
                     var def_case = try macro_set.clone(comp.gpa);
                     var undef_case = try macro_set.clone(comp.gpa);
                     try def_case.put(comp.gpa, macro_name, .def);
@@ -502,7 +505,7 @@ const Merger = struct {
                         .undef => {},
                     }
                 }
-                // std.debug.print("found macro: '{s}': '{s}'\n", .{ name, body });
+                std.debug.print("found macro: '{s}': '{s}'\n", .{ name, body });
                 try m.all_symbols.append(m.arena, .{
                     .clauses = try definesToClauses(m.arena, macro_set),
                     .identifier = try m.arena.dupe(u8, name),
