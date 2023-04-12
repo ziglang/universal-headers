@@ -236,7 +236,11 @@ pub fn main() !void {
 
         var bw = std.io.bufferedWriter(out_file.writer());
         const w = bw.writer();
+
+        try w.writeAll("#pragma once\n");
+
         try merger.minimize(w);
+
         try bw.flush();
     }
 }
@@ -385,6 +389,44 @@ const Merger = struct {
 
         std.debug.print("iterate: {s}/{s}\n", .{ header.input.path, m.h_path });
 
+        std.debug.print("find include guards: {s}/{s}\n", .{ header.input.path, m.h_path });
+        const include_guard_name = name: {
+            var comp = arocc.Compilation.init(m.arena);
+            defer comp.deinit();
+
+            comp.target = header.input.target;
+
+            try comp.system_include_dirs.append(try comp.gpa.dupe(u8, m.sys_include));
+
+            try comp.addDefaultPragmaHandlers();
+
+            if (comp.target.abi == .msvc or comp.target.os.tag == .windows) {
+                comp.langopts.setEmulatedCompiler(.msvc);
+            }
+
+            var pp = arocc.Preprocessor.init(&comp);
+            defer pp.deinit();
+
+            var macro_buf = std.ArrayList(u8).init(comp.gpa);
+            defer macro_buf.deinit();
+
+            try pp.addBuiltinMacros();
+
+            const builtin = try comp.generateBuiltinMacros(&macro_buf);
+            const source = try comp.addSourceFromBuffer(m.h_path, header.source_bytes);
+
+            _ = try pp.preprocess(builtin);
+            const eof = try pp.preprocess(source);
+            try pp.tokens.append(pp.comp.gpa, eof);
+
+            assert(pp.include_guards.count() == 1);
+            var it = pp.include_guards.iterator();
+            const entry = it.next().?;
+            const include_guard_name = entry.value_ptr.*;
+            break :name try m.arena.dupe(u8, include_guard_name);
+        };
+        std.debug.print("include guard: {s}\n", .{include_guard_name});
+
         // We will repeatedly invoke Aro, bailing out when we see a dependency on
         // an unrecognized macro. In such case, we add it to the stack, and invoke
         // Aro for each possibility.
@@ -435,6 +477,9 @@ const Merger = struct {
             defer macro_buf.deinit();
 
             //try pp.addBuiltinMacros();
+
+            // Ignore include guard
+            try pp.ok_defines.put(comp.gpa, include_guard_name, {});
 
             {
                 var it = macro_set.iterator();
@@ -497,6 +542,10 @@ const Merger = struct {
                     const source_bytes = comp.getSource(tokens[0].source).buf;
                     break :b source_bytes[tokens[0].start..tokens[tokens.len - 1].end];
                 };
+
+                // omit the include guard
+                if (mem.eql(u8, name, include_guard_name)) continue;
+
                 // avoid emitting symbols which would define a macro already defined
                 if (macro_set.get(name)) |dep_macro| {
                     switch (dep_macro) {

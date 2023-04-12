@@ -310,7 +310,7 @@ fn preprocessExtra(pp: *Preprocessor, source: Source) MacroError!Token {
                         if_level = ov[0];
 
                         const macro_name = (try pp.expectMacroName(&tokenizer)) orelse continue;
-                        if (!pp.ok_defines.contains(macro_name)) {
+                        if (pp.ok_defines.count() != 0 and !pp.ok_defines.contains(macro_name)) {
                             pp.unexpected_macro = macro_name;
                             return error.UnexpectedMacro;
                         }
@@ -335,7 +335,7 @@ fn preprocessExtra(pp: *Preprocessor, source: Source) MacroError!Token {
                         if_level = ov[0];
 
                         const macro_name = (try pp.expectMacroName(&tokenizer)) orelse continue;
-                        if (!pp.ok_defines.contains(macro_name)) {
+                        if (pp.ok_defines.count() != 0 and !pp.ok_defines.contains(macro_name)) {
                             pp.unexpected_macro = macro_name;
                             return error.UnexpectedMacro;
                         }
