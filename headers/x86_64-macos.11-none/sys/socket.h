@@ -78,7 +78,6 @@
 #include <net/net_kev.h>
 
 
-
 #include <Availability.h>
 
 /*
@@ -184,9 +183,6 @@
 
 
 #define SO_NETSVC_MARKING_LEVEL    0x1119  /* Get QoS marking in effect for socket */
-
-
-/* When adding new socket-options, you need to make sure MPTCP supports these as well! */
 
 /*
  * Network Service Type for option SO_NET_SERVICE_TYPE

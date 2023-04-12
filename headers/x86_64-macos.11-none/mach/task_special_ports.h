@@ -85,9 +85,9 @@ typedef int     task_special_port_t;
  * Evolving and likely to change.
  */
 
-/* Was TASK_SEATBELT_PORT      7        Seatbelt compiler/DEM port for task. */
+#define TASK_SEATBELT_PORT      7       /* Seatbelt compiler/DEM port for task. */
 
-/* Was TASK_GSSD_PORT          8        which transformed to a host port */
+/* PORT 8 was the GSSD TASK PORT which transformed to a host port */
 
 #define TASK_ACCESS_PORT        9       /* Permission check for task_for_pid. */
 

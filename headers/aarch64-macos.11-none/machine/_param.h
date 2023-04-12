@@ -25,9 +25,6 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
-#ifndef _BSD_MACHINE__PARAM_H_
-#define _BSD_MACHINE__PARAM_H_
-
 #if defined (__i386__) || defined (__x86_64__)
 #include <i386/_param.h>
 #elif defined (__arm__) || defined (__arm64__)
@@ -35,5 +32,3 @@
 #else
 #error architecture not supported
 #endif
-
-#endif /* _BSD_MACHINE__PARAM_H_ */
