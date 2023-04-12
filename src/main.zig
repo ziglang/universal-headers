@@ -263,7 +263,7 @@ const Merger = struct {
     }
 
     fn minimize(m: *Merger, writer: anytype) !void {
-        var symbols_by_name = std.StringHashMap(std.ArrayList(Symbol)).init(m.arena);
+        var symbols_by_name = std.StringArrayHashMap(std.ArrayList(Symbol)).init(m.arena);
         for (m.all_symbols.items) |symbol| {
             const gop = try symbols_by_name.getOrPut(symbol.identifier);
             if (!gop.found_existing) {
@@ -272,9 +272,8 @@ const Merger = struct {
             try gop.value_ptr.append(symbol);
         }
 
-        var it = symbols_by_name.iterator();
-        while (it.next()) |entry| {
-            const first = entry.value_ptr.items[0];
+        for (symbols_by_name.values()) |symbols| {
+            const first = symbols.items[0];
 
             std.debug.print("minimizing boolean expression for symbol '{s}'\n", .{first.identifier});
 
@@ -286,7 +285,7 @@ const Merger = struct {
                 index: u16,
                 def: NamedDefine,
             }).init(m.arena);
-            for (entry.value_ptr.items) |symbol| {
+            for (symbols.items) |symbol| {
                 for (symbol.clauses.conjunctives) |conj| {
                     for (conj) |def| {
                         const name = switch (def.define) {
@@ -318,7 +317,7 @@ const Merger = struct {
             try in_writer.print("OUTORDER = {s};\n", .{out_label});
 
             try in_writer.print("{s} = ", .{out_label});
-            for (entry.value_ptr.items, 0..) |symbol, i| {
+            for (symbols.items, 0..) |symbol, i| {
                 for (symbol.clauses.conjunctives, 0..) |conj, k| {
                     for (conj, 0..) |def, j| {
                         const name = switch (def.define) {
@@ -343,7 +342,7 @@ const Merger = struct {
                         try in_writer.print(" & ", .{});
                     }
                 }
-                if (entry.value_ptr.items.len > 1 and i < entry.value_ptr.items.len - 1) {
+                if (symbols.items.len > 1 and i < symbols.items.len - 1) {
                     try in_writer.print(" | ", .{});
                 }
             }
