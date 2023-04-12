@@ -4,12 +4,12 @@
 
     .dependencies = .{
         .libespresso = .{
-            .url = "https://github.com/kubkon/espresso/archive/44d1b720d12a4991094e3efaba3785b522eb3494.tar.gz",
-            .hash = "122061c2d61c3c4013a03c20803118ef938f3a6869b10f65c0b6fcc37e31216fe2d6",
+            .url = "https://github.com/kubkon/espresso/archive/dbf66a4e34fbb17e7f1e133ccdddb7bc5c346aa0.tar.gz",
+            .hash = "122091b05ffac73040fc66f9182ee762de7005ec896ccdc209286d54fa58b528f8ce",
         },
         .libeqntott = .{
-            .url = "https://github.com/kubkon/eqntott/archive/b3343bc4f19b5258f6c1c0c2b6bfbcbe1256bbc8.tar.gz",
-            .hash = "12208b6720ae9c774edfffdf31c082fc7f39402bf4d8c62a4dd9753e63e15102cc6a",
+            .url = "https://github.com/kubkon/eqntott/archive/92820c02bdc4585f81b0fae1013b8f52b6830d31.tar.gz",
+            .hash = "1220ca76e73940429d58bc6b7018797d051a3e2d9b78f7177ac62d32a893c715641d",
         },
     },
 }
