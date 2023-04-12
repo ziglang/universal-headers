@@ -93,13 +93,13 @@ fn getArguments(comptime descriptor: type) []const ZigType.StructField {
 /// number of required arguments
 pub fn requiredArgCount(attr: Tag) u32 {
     switch (attr) {
-        inline else => |tag| comptime {
+        inline else => |tag| return comptime blk: {
             var needed = 0;
             const fields = getArguments(@field(attributes, @tagName(tag)));
             for (fields) |arg_field| {
                 if (!mem.eql(u8, arg_field.name, "__name_tok") and @typeInfo(arg_field.type) != .Optional) needed += 1;
             }
-            return needed;
+            break :blk needed;
         },
     }
 }
@@ -107,13 +107,13 @@ pub fn requiredArgCount(attr: Tag) u32 {
 /// maximum number of args that can be passed
 pub fn maxArgCount(attr: Tag) u32 {
     switch (attr) {
-        inline else => |tag| comptime {
+        inline else => |tag| return comptime blk: {
             const fields = getArguments(@field(attributes, @tagName(tag)));
             var max = 0;
             for (fields) |arg_field| {
                 if (!mem.eql(u8, arg_field.name, "__name_tok")) max += 1;
             }
-            return max;
+            break :blk max;
         },
     }
 }
@@ -887,7 +887,7 @@ pub const Tag = std.meta.DeclEnum(attributes);
 pub const Arguments = blk: {
     const decls = @typeInfo(attributes).Struct.decls;
     var union_fields: [decls.len]ZigType.UnionField = undefined;
-    inline for (decls) |decl, i| {
+    inline for (decls, 0..) |decl, i| {
         union_fields[i] = .{
             .name = decl.name,
             .type = if (@hasDecl(@field(attributes, decl.name), "Args")) @field(attributes, decl.name).Args else void,
@@ -934,7 +934,7 @@ fn fromStringGnu(name: []const u8) ?Tag {
     const normalized = normalize(name);
     const decls = @typeInfo(attributes).Struct.decls;
     @setEvalBranchQuota(3000);
-    inline for (decls) |decl, i| {
+    inline for (decls, 0..) |decl, i| {
         if (@hasDecl(@field(attributes, decl.name), "gnu")) {
             if (mem.eql(u8, @field(attributes, decl.name).gnu, normalized)) {
                 return @intToEnum(Tag, i);
@@ -954,7 +954,7 @@ fn fromStringC2X(namespace: ?[]const u8, name: []const u8) ?Tag {
         return null;
     }
     const decls = @typeInfo(attributes).Struct.decls;
-    inline for (decls) |decl, i| {
+    inline for (decls, 0..) |decl, i| {
         if (@hasDecl(@field(attributes, decl.name), "c2x")) {
             if (mem.eql(u8, @field(attributes, decl.name).c2x, normalized)) {
                 return @intToEnum(Tag, i);
@@ -966,7 +966,7 @@ fn fromStringC2X(namespace: ?[]const u8, name: []const u8) ?Tag {
 
 fn fromStringDeclspec(name: []const u8) ?Tag {
     const decls = @typeInfo(attributes).Struct.decls;
-    inline for (decls) |decl, i| {
+    inline for (decls, 0..) |decl, i| {
         if (@hasDecl(@field(attributes, decl.name), "declspec")) {
             if (mem.eql(u8, @field(attributes, decl.name).declspec, name)) {
                 return @intToEnum(Tag, i);
@@ -1001,7 +1001,7 @@ pub fn applyVariableAttributes(p: *Parser, ty: Type, attr_buf_start: usize, tag:
     if (base_ty.specifier == .attributed) base_ty = base_ty.data.attributed.base;
     var common = false;
     var nocommon = false;
-    for (attrs) |attr, i| switch (attr.tag) {
+    for (attrs, 0..) |attr, i| switch (attr.tag) {
         // zig fmt: off
         .alias, .may_alias, .deprecated, .unavailable, .unused, .warn_if_not_aligned, .weak, .used,
         .noinit, .retain, .persistent, .section, .mode, .asm_label,
@@ -1055,7 +1055,7 @@ pub fn applyFieldAttributes(p: *Parser, field_ty: *Type, attr_buf_start: usize) 
     const attrs = p.attr_buf.items(.attr)[attr_buf_start..];
     const toks = p.attr_buf.items(.tok)[attr_buf_start..];
     p.attr_application_buf.items.len = 0;
-    for (attrs) |attr, i| switch (attr.tag) {
+    for (attrs, 0..) |attr, i| switch (attr.tag) {
         // zig fmt: off
         .@"packed", .may_alias, .deprecated, .unavailable, .unused, .warn_if_not_aligned, .mode,
         => try p.attr_application_buf.append(p.gpa, attr),
@@ -1074,7 +1074,7 @@ pub fn applyTypeAttributes(p: *Parser, ty: Type, attr_buf_start: usize, tag: ?Di
     p.attr_application_buf.items.len = 0;
     var base_ty = ty;
     if (base_ty.specifier == .attributed) base_ty = base_ty.data.attributed.base;
-    for (attrs) |attr, i| switch (attr.tag) {
+    for (attrs, 0..) |attr, i| switch (attr.tag) {
         // zig fmt: off
         .@"packed", .may_alias, .deprecated, .unavailable, .unused, .warn_if_not_aligned, .mode,
          => try p.attr_application_buf.append(p.gpa, attr),
@@ -1119,7 +1119,7 @@ pub fn applyFunctionAttributes(p: *Parser, ty: Type, attr_buf_start: usize) !Typ
     var cold = false;
     var @"noinline" = false;
     var always_inline = false;
-    for (attrs) |attr, i| switch (attr.tag) {
+    for (attrs, 0..) |attr, i| switch (attr.tag) {
         // zig fmt: off
         .noreturn, .unused, .used, .warning, .deprecated, .unavailable, .weak, .pure, .leaf,
         .@"const", .warn_unused_result, .section, .returns_nonnull, .returns_twice, .@"error",
@@ -1216,7 +1216,7 @@ pub fn applyLabelAttributes(p: *Parser, ty: Type, attr_buf_start: usize) !Type {
     p.attr_application_buf.items.len = 0;
     var hot = false;
     var cold = false;
-    for (attrs) |attr, i| switch (attr.tag) {
+    for (attrs, 0..) |attr, i| switch (attr.tag) {
         .unused => try p.attr_application_buf.append(p.gpa, attr),
         .hot => if (cold) {
             try p.errTok(.ignore_hot, toks[i]);
@@ -1239,7 +1239,7 @@ pub fn applyStatementAttributes(p: *Parser, ty: Type, expr_start: TokenIndex, at
     const attrs = p.attr_buf.items(.attr)[attr_buf_start..];
     const toks = p.attr_buf.items(.tok)[attr_buf_start..];
     p.attr_application_buf.items.len = 0;
-    for (attrs) |attr, i| switch (attr.tag) {
+    for (attrs, 0..) |attr, i| switch (attr.tag) {
         .fallthrough => if (p.tok_ids[p.tok_i] != .keyword_case and p.tok_ids[p.tok_i] != .keyword_default) {
             // TODO: this condition is not completely correct; the last statement of a compound
             // statement is also valid if it precedes a switch label (so intervening '}' are ok,
@@ -1257,7 +1257,7 @@ pub fn applyEnumeratorAttributes(p: *Parser, ty: Type, attr_buf_start: usize) !T
     const attrs = p.attr_buf.items(.attr)[attr_buf_start..];
     const toks = p.attr_buf.items(.tok)[attr_buf_start..];
     p.attr_application_buf.items.len = 0;
-    for (attrs) |attr, i| switch (attr.tag) {
+    for (attrs, 0..) |attr, i| switch (attr.tag) {
         .deprecated, .unavailable => try p.attr_application_buf.append(p.gpa, attr),
         else => try ignoredAttrErr(p, toks[i], attr.tag, "enums"),
     };

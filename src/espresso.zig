@@ -26,7 +26,7 @@ extern "c" fn cmppt(?*const anyopaque, ?*const anyopaque) i32;
 extern var cube: c.cube_struct;
 
 pub fn eqnToTruthTable(s: [:0]const u8, writer: anytype) !void {
-    const ptr = @ptrCast(?*anyopaque, @qualCast([*:0]u8, s.ptr));
+    const ptr = @ptrCast(?*anyopaque, @constCast(s.ptr));
     yyfile = c.fmemopen(ptr, s.len, "r");
     defer _ = c.fclose(yyfile);
     yyparse();
@@ -103,7 +103,7 @@ pub const PLA = struct {
     /// TODO a hack so that I can postpone reimplementing internal espresso
     /// routines to work with memory or file descriptors rather than C streams.
     pub fn openMem(s: [:0]const u8) !PLA {
-        const ptr = @ptrCast(?*anyopaque, @qualCast([*:0]u8, s.ptr));
+        const ptr = @ptrCast(?*anyopaque, @constCast(s.ptr));
         const memf = c.fmemopen(ptr, s.len + 1, "r");
         defer _ = c.fclose(memf);
         return openStream(memf);

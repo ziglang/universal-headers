@@ -189,7 +189,7 @@ pub fn main() !void {
     defer header_table.deinit();
 
     // Find all the headers from different libcs that correspond to each other.
-    for (inputs) |*input| {
+    for (&inputs) |*input| {
         var target_dir = try in_dir.openIterableDir(input.path, .{});
         defer target_dir.close();
 
@@ -314,9 +314,9 @@ const Merger = struct {
             try in_writer.print("OUTORDER = {s};\n", .{out_label});
 
             try in_writer.print("{s} = ", .{out_label});
-            for (entry.value_ptr.items) |symbol, i| {
-                for (symbol.clauses.conjunctives) |conj, k| {
-                    for (conj) |def, j| {
+            for (entry.value_ptr.items, 0..) |symbol, i| {
+                for (symbol.clauses.conjunctives, 0..) |conj, k| {
+                    for (conj, 0..) |def, j| {
                         const name = switch (def.define) {
                             .def, .undef => try std.fmt.allocPrint(m.arena, "{s}", .{def.name}),
                             .string => |s| try std.fmt.allocPrint(m.arena, "{s} == {s}", .{ def.name, s }),
@@ -358,7 +358,7 @@ const Merger = struct {
             try writer.print("#if ", .{});
 
             var output_labels = std.ArrayList([]const u8).init(m.arena);
-            for (encoding.keys()) |_, i| {
+            for (encoding.keys(), 0..) |_, i| {
                 const def = encoding.values()[i].def;
                 const name = switch (def.define) {
                     .def, .undef => try std.fmt.allocPrint(m.arena, "defined({s})", .{def.name}),
@@ -560,7 +560,7 @@ const Merger = struct {
 /// converts e.g. `a and b and c` to `(a) and (b) and (c)`
 fn definesToClauses(arena: Allocator, defines: Defines) !Clauses {
     const conjunctives = try arena.alloc([]NamedDefine, defines.count());
-    for (conjunctives) |*inner_list, i| {
+    for (conjunctives, 0..) |*inner_list, i| {
         inner_list.* = try arena.create([1]NamedDefine);
         inner_list.*[0] = .{
             .name = defines.keys()[i],

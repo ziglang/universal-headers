@@ -1205,7 +1205,7 @@ fn genCall(c: *CodeGen, fn_node: NodeIndex, arg_nodes: []const NodeIndex, ty: Ty
     };
 
     const args = try c.builder.arena.allocator().alloc(Ir.Ref, arg_nodes.len);
-    for (arg_nodes) |node, i| {
+    for (arg_nodes, 0..) |node, i| {
         // TODO handle calling convention here
         args[i] = try c.genExpr(node);
     }

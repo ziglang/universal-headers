@@ -1079,7 +1079,7 @@ pub fn eql(a_param: Type, b_param: Type, comp: *const Compilation, check_qualifi
             if (a.data.func.params.len != b.data.func.params.len) return false;
             // return type cannot have qualifiers
             if (!a.returnType().eql(b.returnType(), comp, false)) return false;
-            for (a.data.func.params) |param, i| {
+            for (a.data.func.params, 0..) |param, i| {
                 var a_unqual = param.ty;
                 a_unqual.qual.@"const" = false;
                 a_unqual.qual.@"volatile" = false;
@@ -2247,7 +2247,7 @@ fn printEpilogue(ty: Type, mapper: StringInterner.TypeMapper, langopts: LangOpts
         },
         .func, .var_args_func, .old_style_func => {
             try w.writeByte('(');
-            for (ty.data.func.params) |param, i| {
+            for (ty.data.func.params, 0..) |param, i| {
                 if (i != 0) try w.writeAll(", ");
                 _ = try param.ty.printPrologue(mapper, langopts, w);
                 try param.ty.printEpilogue(mapper, langopts, w);
@@ -2312,7 +2312,7 @@ pub fn dump(ty: Type, mapper: StringInterner.TypeMapper, langopts: LangOpts, w: 
         },
         .func, .var_args_func, .old_style_func => {
             try w.writeAll("fn (");
-            for (ty.data.func.params) |param, i| {
+            for (ty.data.func.params, 0..) |param, i| {
                 if (i != 0) try w.writeAll(", ");
                 if (param.name != .empty) try w.print("{s}: ", .{mapper.lookup(param.name)});
                 try param.ty.dump(mapper, langopts, w);
@@ -2818,6 +2818,8 @@ pub const CType = enum {
                 .wasm32,
                 .wasm64,
                 => 16,
+
+                .xtensa => @panic("TODO"),
             },
         );
     }
