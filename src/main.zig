@@ -191,35 +191,68 @@ pub fn main() !void {
         std.debug.print("merge '{s}'...\n", .{h_path});
 
         // parse the headers into graphs
+        var graph_set = std.ArrayList(Graph).init(arena);
         for (entry.value_ptr.items) |header| {
             std.debug.print("doing {s} now\n", .{header.input.path});
             const graph = try parseHeaderIntoGraph(arena, h_path, header, sys_include);
 
-            for (graph.nodes) |node| {
+            for (graph.nodes.items) |node| {
                 std.debug.print("node: definition: '{s}' => '{s}'\n", .{ node.definition.name, node.definition.source });
             }
+            try graph_set.append(graph);
         }
 
         // topological sort the graphs
+        // TODO
 
         // consume nodes from inputs to output
+        var output_nodes = std.ArrayList(Node).init(arena);
+        while (anyLeft(&graph_set)) {
+            const first_graph = &graph_set.items[0];
+            const first_node = first_graph.popFirst();
+            // figure out where to put this node in the output
+            try output_nodes.append(first_node);
+            for (graph_set.items[1..]) |*graph| {
+                const node = graph.popFirst();
+                if (!mem.eql(u8, node.definition.name, first_node.definition.name)) {
+                    std.debug.print("non-matching name: {s} {s}\n", .{ node.definition.name, first_node.definition.name });
+                    @panic("TODO");
+                }
+            }
+        }
 
         // render output
+        if (fs.path.dirname(h_path)) |dirname| {
+            try out_dir.dir.makePath(dirname);
+        }
 
-        //var out_file = try out_dir.dir.createFile(h_path, .{});
-        //defer out_file.close();
+        var out_file = try out_dir.dir.createFile(h_path, .{});
+        defer out_file.close();
 
-        //var bw = std.io.bufferedWriter(out_file.writer());
-        //const w = bw.writer();
+        var bw = std.io.bufferedWriter(out_file.writer());
+        const w = bw.writer();
 
-        ////try w.writeAll("#pragma once\n");
+        //try w.writeAll("#pragma once\n");
 
-        //try bw.flush();
+        for (output_nodes.items) |node| {
+            switch (node) {
+                .definition => |definition| {
+                    try w.print("{s}\n", .{definition.source});
+                },
+                .condition => @panic("TODO"),
+            }
+        }
+
+        try bw.flush();
     }
 }
 
 const Graph = struct {
-    nodes: []Node,
+    nodes: std.ArrayList(Node),
+
+    fn popFirst(graph: *Graph) Node {
+        return graph.nodes.orderedRemove(0);
+    }
 };
 
 const Node = union(enum) {
@@ -386,7 +419,7 @@ fn parseHeaderIntoGraph(arena: Allocator, h_path: []const u8, header: Header, sy
     }
 
     return .{
-        .nodes = nodes.items,
+        .nodes = nodes,
     };
 }
 
@@ -496,4 +529,11 @@ fn handleKeywordDefine(arena: Allocator, source: arocc.Source, nodes: *std.Array
 pub fn tokSlice(source: arocc.Source, tok: Tokenizer.Token) []const u8 {
     if (tok.id.lexeme()) |s| return s;
     return source.buf[tok.start..tok.end];
+}
+
+fn anyLeft(graph_set: *std.ArrayList(Graph)) bool {
+    for (graph_set.items) |graph| {
+        if (graph.nodes.items.len > 0) return true;
+    }
+    return false;
 }
