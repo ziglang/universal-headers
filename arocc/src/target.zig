@@ -1,7 +1,7 @@
 const std = @import("std");
 const LangOpts = @import("LangOpts.zig");
 const Type = @import("Type.zig");
-const CType = Type.CType;
+const CType = @import("zig").CType;
 const TargetSet = @import("builtins/Properties.zig").TargetSet;
 
 pub fn getCharSignedness(target: std.Target) std.builtin.Signedness {
@@ -162,6 +162,13 @@ pub fn systemCompiler(target: std.Target) LangOpts.Compiler {
 pub fn hasInt128(target: std.Target) bool {
     if (target.cpu.arch == .wasm32) return true;
     return target.cpu.arch.ptrBitWidth() >= 64;
+}
+
+pub fn hasHalfPrecisionFloatABI(target: std.Target) bool {
+    return switch (target.cpu.arch) {
+        .thumb, .thumbeb, .arm, .aarch64 => true,
+        else => false,
+    };
 }
 
 pub const FPSemantics = enum {

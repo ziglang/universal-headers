@@ -2,6 +2,7 @@ const std = @import("std");
 const mem = std.mem;
 const Allocator = mem.Allocator;
 const assert = std.debug.assert;
+const big = std.math.big;
 const Compilation = @import("Compilation.zig");
 const Source = @import("Source.zig");
 const Tokenizer = @import("Tokenizer.zig");
@@ -24,7 +25,7 @@ const StringId = @import("StringInterner.zig").StringId;
 const number_affixes = @import("number_affixes.zig");
 const NumberPrefix = number_affixes.Prefix;
 const NumberSuffix = number_affixes.Suffix;
-const CType = Type.CType;
+const CType = @import("zig").CType;
 const BuiltinFunction = @import("builtins/BuiltinFunction.zig");
 
 const Parser = @This();
@@ -798,8 +799,8 @@ fn decl(p: *Parser) Error!bool {
             const specifier = decl_spec.ty.canonicalize(.standard).specifier;
             const attrs = p.attr_buf.items(.attr)[attr_buf_top..];
             const toks = p.attr_buf.items(.tok)[attr_buf_top..];
-            for (attrs, 0..) |attr, i| {
-                try p.errExtra(.ignored_record_attr, toks[i], .{
+            for (attrs, toks) |attr, tok| {
+                try p.errExtra(.ignored_record_attr, tok, .{
                     .ignored_record_attr = .{ .tag = attr.tag, .specifier = switch (specifier) {
                         .@"enum" => .@"enum",
                         .@"struct" => .@"struct",
@@ -1007,6 +1008,43 @@ fn decl(p: *Parser) Error!bool {
     return true;
 }
 
+fn staticAssertMessage(p: *Parser, cond_node: NodeIndex, message: Result) !?[]const u8 {
+    const cond_tag = p.nodes.items(.tag)[@enumToInt(cond_node)];
+    if (cond_tag != .builtin_types_compatible_p and message.node == .none) return null;
+
+    var buf = std.ArrayList(u8).init(p.gpa);
+    defer buf.deinit();
+
+    if (cond_tag == .builtin_types_compatible_p) {
+        const mapper = p.comp.string_interner.getSlowTypeMapper();
+        const data = p.nodes.items(.data)[@enumToInt(cond_node)].bin;
+
+        try buf.appendSlice("'__builtin_types_compatible_p(");
+
+        const lhs_ty = p.nodes.items(.ty)[@enumToInt(data.lhs)];
+        try lhs_ty.print(mapper, p.comp.langopts, buf.writer());
+        try buf.appendSlice(", ");
+
+        const rhs_ty = p.nodes.items(.ty)[@enumToInt(data.rhs)];
+        try rhs_ty.print(mapper, p.comp.langopts, buf.writer());
+
+        try buf.appendSlice(")'");
+    }
+    if (message.node != .none) {
+        if (buf.items.len > 0) {
+            try buf.append(' ');
+        }
+        const data = message.val.data.bytes;
+        try buf.ensureUnusedCapacity(data.len);
+        try Tree.dumpStr(
+            data,
+            p.nodes.items(.tag)[@enumToInt(message.node)],
+            buf.writer(),
+        );
+    }
+    return try p.comp.diag.arena.allocator().dupe(u8, buf.items);
+}
+
 /// staticAssert
 ///    : keyword_static_assert '(' integerConstExpr (',' STRING_LITERAL)? ')' ';'
 ///    | keyword_c23_static_assert '(' integerConstExpr (',' STRING_LITERAL)? ')' ';'
@@ -1015,6 +1053,7 @@ fn staticAssert(p: *Parser) Error!bool {
     const l_paren = try p.expectToken(.l_paren);
     const res_token = p.tok_i;
     var res = try p.constExpr(.gnu_folding_extension);
+    const res_node = res.node;
     const str = if (p.eatToken(.comma) != null)
         switch (p.tok_ids[p.tok_i]) {
             .string_literal,
@@ -1053,23 +1092,11 @@ fn staticAssert(p: *Parser) Error!bool {
         }
     } else {
         if (!res.val.getBool()) {
-            if (str.node != .none) {
-                var buf = std.ArrayList(u8).init(p.gpa);
-                defer buf.deinit();
-
-                const data = str.val.data.bytes;
-                try buf.ensureUnusedCapacity(data.len);
-                try Tree.dumpStr(
-                    data,
-                    p.nodes.items(.tag)[@enumToInt(str.node)],
-                    buf.writer(),
-                );
-                try p.errStr(
-                    .static_assert_failure_message,
-                    static_assert,
-                    try p.comp.diag.arena.allocator().dupe(u8, buf.items),
-                );
-            } else try p.errTok(.static_assert_failure, static_assert);
+            if (try p.staticAssertMessage(res_node, str)) |message| {
+                try p.errStr(.static_assert_failure_message, static_assert, message);
+            } else {
+                try p.errTok(.static_assert_failure, static_assert);
+            }
         }
     }
 
@@ -1630,6 +1657,7 @@ fn typeSpec(p: *Parser, ty: *Type.Builder) Error!bool {
             .keyword_signed => try ty.combine(p, .signed, p.tok_i),
             .keyword_unsigned => try ty.combine(p, .unsigned, p.tok_i),
             .keyword_fp16 => try ty.combine(p, .fp16, p.tok_i),
+            .keyword_float16 => try ty.combine(p, .float16, p.tok_i),
             .keyword_float => try ty.combine(p, .float, p.tok_i),
             .keyword_double => try ty.combine(p, .double, p.tok_i),
             .keyword_complex => try ty.combine(p, .complex, p.tok_i),
@@ -3573,9 +3601,8 @@ fn stmt(p: *Parser) Error!NodeIndex {
         var cond = try p.expr();
         try cond.expect(p);
         try cond.lvalConversion(p);
-        if (cond.ty.isInt())
-            try cond.intCast(p, cond.ty.integerPromotion(p.comp), cond_tok)
-        else if (!cond.ty.isScalarNonInt())
+        try cond.usualUnaryConversion(p, cond_tok);
+        if (!cond.ty.isScalar())
             try p.errStr(.statement_scalar, l_paren + 1, try p.typeStr(cond.ty));
         try cond.saveValue(p);
         try p.expectClosing(l_paren, .r_paren);
@@ -3600,9 +3627,9 @@ fn stmt(p: *Parser) Error!NodeIndex {
         var cond = try p.expr();
         try cond.expect(p);
         try cond.lvalConversion(p);
-        if (cond.ty.isInt())
-            try cond.intCast(p, cond.ty.integerPromotion(p.comp), cond_tok)
-        else
+        try cond.usualUnaryConversion(p, cond_tok);
+
+        if (!cond.ty.isInt())
             try p.errStr(.statement_int, l_paren + 1, try p.typeStr(cond.ty));
         try cond.saveValue(p);
         try p.expectClosing(l_paren, .r_paren);
@@ -3631,9 +3658,8 @@ fn stmt(p: *Parser) Error!NodeIndex {
         var cond = try p.expr();
         try cond.expect(p);
         try cond.lvalConversion(p);
-        if (cond.ty.isInt())
-            try cond.intCast(p, cond.ty.integerPromotion(p.comp), cond_tok)
-        else if (!cond.ty.isScalarNonInt())
+        try cond.usualUnaryConversion(p, cond_tok);
+        if (!cond.ty.isScalar())
             try p.errStr(.statement_scalar, l_paren + 1, try p.typeStr(cond.ty));
         try cond.saveValue(p);
         try p.expectClosing(l_paren, .r_paren);
@@ -3664,9 +3690,9 @@ fn stmt(p: *Parser) Error!NodeIndex {
         var cond = try p.expr();
         try cond.expect(p);
         try cond.lvalConversion(p);
-        if (cond.ty.isInt())
-            try cond.intCast(p, cond.ty.integerPromotion(p.comp), cond_tok)
-        else if (!cond.ty.isScalarNonInt())
+        try cond.usualUnaryConversion(p, cond_tok);
+
+        if (!cond.ty.isScalar())
             try p.errStr(.statement_scalar, l_paren + 1, try p.typeStr(cond.ty));
         try cond.saveValue(p);
         try p.expectClosing(l_paren, .r_paren);
@@ -3699,9 +3725,8 @@ fn stmt(p: *Parser) Error!NodeIndex {
         var cond = try p.expr();
         if (cond.node != .none) {
             try cond.lvalConversion(p);
-            if (cond.ty.isInt())
-                try cond.intCast(p, cond.ty.integerPromotion(p.comp), cond_tok)
-            else if (!cond.ty.isScalarNonInt())
+            try cond.usualUnaryConversion(p, cond_tok);
+            if (!cond.ty.isScalar())
                 try p.errStr(.statement_scalar, l_paren + 1, try p.typeStr(cond.ty));
         }
         try cond.saveValue(p);
@@ -4307,9 +4332,8 @@ const Result = struct {
     fn maybeWarnUnused(res: Result, p: *Parser, expr_start: TokenIndex, err_start: usize) Error!void {
         if (res.ty.is(.void) or res.node == .none) return;
         // don't warn about unused result if the expression contained errors besides other unused results
-        var i = err_start;
-        while (i < p.comp.diag.list.items.len) : (i += 1) {
-            if (p.comp.diag.list.items[i].tag != .unused_value) return;
+        for (p.comp.diag.list.items[err_start..]) |err_item| {
+            if (err_item.tag != .unused_value) return;
         }
         var cur_node = res.node;
         while (true) switch (p.nodes.items(.tag)[@enumToInt(cur_node)]) {
@@ -4715,8 +4739,11 @@ const Result = struct {
                 res.ty = int_ty;
                 try res.implicitCast(p, .int_cast);
             } else if (old_real) {
-                res.ty = int_ty.makeReal();
-                try res.implicitCast(p, .int_cast);
+                const real_int_ty = int_ty.makeReal();
+                if (!res.ty.eql(real_int_ty, p.comp, false)) {
+                    res.ty = real_int_ty;
+                    try res.implicitCast(p, .int_cast);
+                }
                 res.ty = int_ty;
                 try res.implicitCast(p, .real_to_complex_int);
             } else if (new_real) {
@@ -4779,15 +4806,19 @@ const Result = struct {
                 res.ty = float_ty;
                 try res.implicitCast(p, .float_cast);
             } else if (old_real) {
-                res.ty = float_ty.makeReal();
-                try res.implicitCast(p, .float_cast);
+                if (res.ty.floatRank() != float_ty.floatRank()) {
+                    res.ty = float_ty.makeReal();
+                    try res.implicitCast(p, .float_cast);
+                }
                 res.ty = float_ty;
                 try res.implicitCast(p, .real_to_complex_float);
             } else if (new_real) {
                 res.ty = res.ty.makeReal();
                 try res.implicitCast(p, .complex_float_to_real);
-                res.ty = float_ty;
-                try res.implicitCast(p, .float_cast);
+                if (res.ty.floatRank() != float_ty.floatRank()) {
+                    res.ty = float_ty;
+                    try res.implicitCast(p, .float_cast);
+                }
             } else {
                 res.ty = float_ty;
                 try res.implicitCast(p, .complex_float_cast);
@@ -4819,16 +4850,57 @@ const Result = struct {
         try res.implicitCast(p, .null_to_pointer);
     }
 
+    fn usualUnaryConversion(res: *Result, p: *Parser, tok: TokenIndex) Error!void {
+        if (res.ty.isFloat()) fp_eval: {
+            const eval_method = p.comp.langopts.fp_eval_method orelse break :fp_eval;
+            switch (eval_method) {
+                .source => {},
+                .indeterminate => unreachable,
+                .double => {
+                    if (res.ty.floatRank() < (Type{ .specifier = .double }).floatRank()) {
+                        const spec: Type.Specifier = if (res.ty.isReal()) .double else .complex_double;
+                        return res.floatCast(p, .{ .specifier = spec });
+                    }
+                },
+                .extended => {
+                    if (res.ty.floatRank() < (Type{ .specifier = .long_double }).floatRank()) {
+                        const spec: Type.Specifier = if (res.ty.isReal()) .long_double else .complex_long_double;
+                        return res.floatCast(p, .{ .specifier = spec });
+                    }
+                },
+            }
+        }
+
+        if (res.ty.is(.fp16) and !p.comp.langopts.use_native_half_type) {
+            return res.floatCast(p, .{ .specifier = .float });
+        }
+        if (res.ty.isInt()) {
+            const slice = p.nodes.slice();
+            if (Tree.bitfieldWidth(slice, res.node, true)) |width| {
+                if (res.ty.bitfieldPromotion(p.comp, width)) |promotion_ty| {
+                    return res.intCast(p, promotion_ty, tok);
+                }
+            }
+            return res.intCast(p, res.ty.integerPromotion(p.comp), tok);
+        }
+    }
+
     fn usualArithmeticConversion(a: *Result, b: *Result, p: *Parser, tok: TokenIndex) Error!void {
+        try a.usualUnaryConversion(p, tok);
+        try b.usualUnaryConversion(p, tok);
+
         // if either is a float cast to that type
         if (a.ty.isFloat() or b.ty.isFloat()) {
-            const float_types = [6][2]Type.Specifier{
+            const float_types = [7][2]Type.Specifier{
                 .{ .complex_long_double, .long_double },
                 .{ .complex_float128, .float128 },
                 .{ .complex_float80, .float80 },
                 .{ .complex_double, .double },
                 .{ .complex_float, .float },
-                .{ .complex_fp16, .fp16 },
+                // No `_Complex __fp16` type
+                .{ .invalid, .fp16 },
+                // No `_Complex _Float16`
+                .{ .invalid, .float16 },
             };
             const a_spec = a.ty.canonicalize(.standard).specifier;
             const b_spec = b.ty.canonicalize(.standard).specifier;
@@ -4846,42 +4918,23 @@ const Result = struct {
             if (try a.floatConversion(b, a_spec, b_spec, p, float_types[3])) return;
             if (try a.floatConversion(b, a_spec, b_spec, p, float_types[4])) return;
             if (try a.floatConversion(b, a_spec, b_spec, p, float_types[5])) return;
+            if (try a.floatConversion(b, a_spec, b_spec, p, float_types[6])) return;
         }
 
-        // Do integer promotion on both operands
-        const a_promoted = a.ty.integerPromotion(p.comp);
-        const b_promoted = b.ty.integerPromotion(p.comp);
-        if (a_promoted.eql(b_promoted, p.comp, true)) {
+        if (a.ty.eql(b.ty, p.comp, true)) {
             // cast to promoted type
-            try a.intCast(p, a_promoted, tok);
-            try b.intCast(p, a_promoted, tok);
+            try a.intCast(p, a.ty, tok);
+            try b.intCast(p, b.ty, tok);
             return;
         }
 
-        const a_unsigned = a_promoted.isUnsignedInt(p.comp);
-        const b_unsigned = b_promoted.isUnsignedInt(p.comp);
-        if (a_unsigned == b_unsigned) {
-            // cast to greater signed or unsigned type
-            const res_spec = std.math.max(@enumToInt(a_promoted.specifier), @enumToInt(b_promoted.specifier));
-            const res_ty = Type{ .specifier = @intToEnum(Type.Specifier, res_spec) };
-            try a.intCast(p, res_ty, tok);
-            try b.intCast(p, res_ty, tok);
-            return;
+        const target = a.ty.integerConversion(b.ty, p.comp);
+        if (!target.isReal()) {
+            try a.saveValue(p);
+            try b.saveValue(p);
         }
-
-        // cast to the unsigned type with greater rank
-        const a_larger = @enumToInt(a_promoted.specifier) > @enumToInt(b_promoted.specifier);
-        const b_larger = @enumToInt(b_promoted.specifier) > @enumToInt(a_promoted.specifier);
-        if (a_unsigned) {
-            const target = if (a_larger) a_promoted else b_promoted;
-            try a.intCast(p, target, tok);
-            try b.intCast(p, target, tok);
-        } else {
-            assert(b_unsigned);
-            const target = if (b_larger) b_promoted else a_promoted;
-            try a.intCast(p, target, tok);
-            try b.intCast(p, target, tok);
-        }
+        try a.intCast(p, target, tok);
+        try b.intCast(p, target, tok);
     }
 
     fn floatConversion(a: *Result, b: *Result, a_spec: Type.Specifier, b_spec: Type.Specifier, p: *Parser, pair: [2]Type.Specifier) !bool {
@@ -5800,10 +5853,45 @@ fn castExpr(p: *Parser) Error!Result {
         .builtin_va_arg => return p.builtinVaArg(),
         .builtin_offsetof => return p.builtinOffsetof(false),
         .builtin_bitoffsetof => return p.builtinOffsetof(true),
+        .builtin_types_compatible_p => return p.typesCompatible(),
         // TODO: other special-cased builtins
         else => {},
     }
     return p.unExpr();
+}
+
+fn typesCompatible(p: *Parser) Error!Result {
+    p.tok_i += 1;
+    const l_paren = try p.expectToken(.l_paren);
+
+    const first = (try p.typeName()) orelse {
+        try p.err(.expected_type);
+        p.skipTo(.r_paren);
+        return error.ParsingFailed;
+    };
+    const lhs = try p.addNode(.{ .tag = .invalid, .ty = first, .data = undefined });
+    _ = try p.expectToken(.comma);
+
+    const second = (try p.typeName()) orelse {
+        try p.err(.expected_type);
+        p.skipTo(.r_paren);
+        return error.ParsingFailed;
+    };
+    const rhs = try p.addNode(.{ .tag = .invalid, .ty = second, .data = undefined });
+
+    try p.expectClosing(l_paren, .r_paren);
+
+    const compatible = first.compatible(second, p.comp);
+
+    var res = Result{
+        .val = Value.int(@boolToInt(compatible)),
+        .node = try p.addNode(.{ .tag = .builtin_types_compatible_p, .ty = Type.int, .data = .{ .bin = .{
+            .lhs = lhs,
+            .rhs = rhs,
+        } } }),
+    };
+    try p.value_map.put(res.node, res.val);
+    return res;
 }
 
 fn builtinChooseExpr(p: *Parser) Error!Result {
@@ -6064,7 +6152,8 @@ fn unExpr(p: *Parser) Error!Result {
             if (!operand.ty.isInt() and !operand.ty.isFloat())
                 try p.errStr(.invalid_argument_un, tok, try p.typeStr(operand.ty));
 
-            if (operand.ty.isInt()) try operand.intCast(p, operand.ty.integerPromotion(p.comp), tok);
+            try operand.usualUnaryConversion(p, tok);
+
             return operand;
         },
         .minus => {
@@ -6076,7 +6165,7 @@ fn unExpr(p: *Parser) Error!Result {
             if (!operand.ty.isInt() and !operand.ty.isFloat())
                 try p.errStr(.invalid_argument_un, tok, try p.typeStr(operand.ty));
 
-            if (operand.ty.isInt()) try operand.intCast(p, operand.ty.integerPromotion(p.comp), tok);
+            try operand.usualUnaryConversion(p, tok);
             if (operand.val.tag == .int or operand.val.tag == .float) {
                 _ = operand.val.sub(operand.val.zero(), operand.val, operand.ty, p.comp);
             } else {
@@ -6097,7 +6186,7 @@ fn unExpr(p: *Parser) Error!Result {
                 try p.errTok(.not_assignable, tok);
                 return error.ParsingFailed;
             }
-            if (operand.ty.isInt()) try operand.intCast(p, operand.ty.integerPromotion(p.comp), tok);
+            try operand.usualUnaryConversion(p, tok);
 
             if (operand.val.tag == .int or operand.val.tag == .float) {
                 if (operand.val.add(operand.val, operand.val.one(), operand.ty, p.comp))
@@ -6121,7 +6210,7 @@ fn unExpr(p: *Parser) Error!Result {
                 try p.errTok(.not_assignable, tok);
                 return error.ParsingFailed;
             }
-            if (operand.ty.isInt()) try operand.intCast(p, operand.ty.integerPromotion(p.comp), tok);
+            try operand.usualUnaryConversion(p, tok);
 
             if (operand.val.tag == .int or operand.val.tag == .float) {
                 if (operand.val.sub(operand.val, operand.val.one(), operand.ty, p.comp))
@@ -6139,13 +6228,13 @@ fn unExpr(p: *Parser) Error!Result {
             var operand = try p.castExpr();
             try operand.expect(p);
             try operand.lvalConversion(p);
-            if (!operand.ty.isInt()) try p.errStr(.invalid_argument_un, tok, try p.typeStr(operand.ty));
+            try operand.usualUnaryConversion(p, tok);
             if (operand.ty.isInt()) {
-                try operand.intCast(p, operand.ty.integerPromotion(p.comp), tok);
                 if (operand.val.tag == .int) {
                     operand.val = operand.val.bitNot(operand.ty, p.comp);
                 }
             } else {
+                try p.errStr(.invalid_argument_un, tok, try p.typeStr(operand.ty));
                 operand.val.tag = .unavailable;
             }
             try operand.un(p, .bit_not_expr);
@@ -6160,7 +6249,7 @@ fn unExpr(p: *Parser) Error!Result {
             if (!operand.ty.isScalar())
                 try p.errStr(.invalid_argument_un, tok, try p.typeStr(operand.ty));
 
-            if (operand.ty.isInt()) try operand.intCast(p, operand.ty.integerPromotion(p.comp), tok);
+            try operand.usualUnaryConversion(p, tok);
             if (operand.val.tag == .int) {
                 const res = Value.int(@boolToInt(!operand.val.getBool()));
                 operand.val = res;
@@ -6362,7 +6451,7 @@ fn suffixExpr(p: *Parser, lhs: Result) Error!Result {
                 try p.err(.not_assignable);
                 return error.ParsingFailed;
             }
-            if (operand.ty.isInt()) try operand.intCast(p, operand.ty.integerPromotion(p.comp), p.tok_i);
+            try operand.usualUnaryConversion(p, p.tok_i);
 
             try operand.un(p, .post_inc_expr);
             return operand;
@@ -6378,7 +6467,7 @@ fn suffixExpr(p: *Parser, lhs: Result) Error!Result {
                 try p.err(.not_assignable);
                 return error.ParsingFailed;
             }
-            if (operand.ty.isInt()) try operand.intCast(p, operand.ty.integerPromotion(p.comp), p.tok_i);
+            try operand.usualUnaryConversion(p, p.tok_i);
 
             try operand.un(p, .post_dec_expr);
             return operand;
@@ -7149,10 +7238,11 @@ fn parseFloat(p: *Parser, buf: []const u8, suffix: NumberSuffix) !Result {
             try p.err(.gnu_imaginary_constant);
             return p.todo("long double imaginary literals");
         },
-        .None, .I, .F, .IF => {
+        .None, .I, .F, .IF, .F16 => {
             const ty = Type{ .specifier = switch (suffix) {
                 .None, .I => .double,
                 .F, .IF => .float,
+                .F16 => .float16,
                 else => unreachable,
             } };
             const d_val = std.fmt.parseFloat(f64, buf) catch |er| switch (er) {
@@ -7162,6 +7252,7 @@ fn parseFloat(p: *Parser, buf: []const u8, suffix: NumberSuffix) !Result {
             const tag: Tree.Tag = switch (suffix) {
                 .None, .I => .double_literal,
                 .F, .IF => .float_literal,
+                .F16 => .float16_literal,
                 else => unreachable,
             };
             var res = Result{
@@ -7232,11 +7323,7 @@ fn getIntegerPart(p: *Parser, buf: []const u8, prefix: NumberPrefix, tok_i: Toke
     return buf;
 }
 
-fn parseInt(p: *Parser, prefix: NumberPrefix, buf: []const u8, suffix: NumberSuffix, tok_i: TokenIndex) !Result {
-    if (prefix == .binary) {
-        try p.errTok(.binary_integer_literal, tok_i);
-    }
-    const base = @enumToInt(prefix);
+fn fixedSizeInt(p: *Parser, base: u8, buf: []const u8, suffix: NumberSuffix, tok_i: TokenIndex) !Result {
     var val: u64 = 0;
     var overflow = false;
     for (buf) |c| {
@@ -7271,7 +7358,7 @@ fn parseInt(p: *Parser, prefix: NumberPrefix, buf: []const u8, suffix: NumberSuf
             try p.errTok(.implicitly_unsigned_literal, tok_i);
         }
     }
-    var res = try if (base == 10)
+    return if (base == 10)
         switch (suffix) {
             .None, .I => p.castInt(val, &.{ .int, .long, .long_long }),
             .U, .IU => p.castInt(val, &.{ .uint, .ulong, .ulong_long }),
@@ -7290,12 +7377,78 @@ fn parseInt(p: *Parser, prefix: NumberPrefix, buf: []const u8, suffix: NumberSuf
         .ULL, .IULL => p.castInt(val, &.{.ulong_long}),
         else => unreachable,
     };
+}
+
+fn parseInt(p: *Parser, prefix: NumberPrefix, buf: []const u8, suffix: NumberSuffix, tok_i: TokenIndex) !Result {
+    if (prefix == .binary) {
+        try p.errTok(.binary_integer_literal, tok_i);
+    }
+    const base = @enumToInt(prefix);
+    var res = if (suffix.isBitInt())
+        try p.bitInt(base, buf, suffix, tok_i)
+    else
+        try p.fixedSizeInt(base, buf, suffix, tok_i);
+
     if (suffix.isImaginary()) {
         try p.errTok(.gnu_imaginary_constant, tok_i);
         res.ty = res.ty.makeComplex();
         res.val.tag = .unavailable;
         try res.un(p, .imaginary_literal);
     }
+    return res;
+}
+
+fn bitInt(p: *Parser, base: u8, buf: []const u8, suffix: NumberSuffix, tok_i: TokenIndex) Error!Result {
+    try p.errStr(.pre_c2x_compat, tok_i, "'_BitInt' suffix for literals");
+    try p.errTok(.bitint_suffix, tok_i);
+
+    var managed = try big.int.Managed.init(p.comp.gpa);
+    defer managed.deinit();
+
+    managed.setString(base, buf) catch |e| switch (e) {
+        error.InvalidBase => unreachable, // `base` is one of 2, 8, 10, 16
+        error.InvalidCharacter => unreachable, // digits validated by Tokenizer
+        else => |er| return er,
+    };
+    const c = managed.toConst();
+    const bits_needed = blk: {
+        // Literal `0` requires at least 1 bit
+        const count = std.math.max(1, c.bitCountTwosComp());
+        // The wb suffix results in a _BitInt that includes space for the sign bit even if the
+        // value of the constant is positive or was specified in hexadecimal or octal notation.
+        const sign_bits = @boolToInt(suffix.isSignedInteger());
+        const bits_needed = count + sign_bits;
+        if (bits_needed > Compilation.bit_int_max_bits) {
+            const specifier: Type.Builder.Specifier = switch (suffix) {
+                .WB => .{ .bit_int = 0 },
+                .UWB => .{ .ubit_int = 0 },
+                .IWB => .{ .complex_bit_int = 0 },
+                .IUWB => .{ .complex_ubit_int = 0 },
+                else => unreachable,
+            };
+            try p.errStr(.bit_int_too_big, tok_i, specifier.str(p.comp.langopts).?);
+            return error.ParsingFailed;
+        }
+        if (bits_needed > 64) {
+            return p.todo("_BitInt constants > 64 bits");
+        }
+        break :blk @intCast(std.math.IntFittingRange(0, Compilation.bit_int_max_bits), bits_needed);
+    };
+
+    const val = c.to(u64) catch |e| switch (e) {
+        error.NegativeIntoUnsigned => unreachable, // unary minus parsed elsewhere; we only see positive integers
+        error.TargetTooSmall => unreachable, // Validated above but Todo: handle larger _BitInt
+    };
+
+    var res: Result = .{
+        .val = Value.int(val),
+        .ty = .{
+            .specifier = .bit_int,
+            .data = .{ .int = .{ .bits = bits_needed, .signedness = suffix.signedness() } },
+        },
+    };
+    res.node = try p.addNode(.{ .tag = .int_literal, .ty = res.ty, .data = .{ .int = val } });
+    if (!p.in_macro) try p.value_map.put(res.node, res.val);
     return res;
 }
 
@@ -7482,12 +7635,11 @@ fn genericSelection(p: *Parser) Error!Result {
                 try p.errStr(.generic_duplicate, start, try p.typeStr(ty));
                 try p.errStr(.generic_duplicate_here, chosen_tok, try p.typeStr(ty));
             }
-            for (p.list_buf.items[list_buf_top + 1 ..], 0..) |item, i| {
+            for (p.list_buf.items[list_buf_top + 1 ..], p.decl_buf.items[decl_buf_top..]) |item, prev_tok| {
                 const prev_ty = p.nodes.items(.ty)[@enumToInt(item)];
                 if (prev_ty.eql(ty, p.comp, true)) {
                     try p.errStr(.generic_duplicate, start, try p.typeStr(ty));
-                    const prev_tok = @enumToInt(p.decl_buf.items[decl_buf_top + i]);
-                    try p.errStr(.generic_duplicate_here, prev_tok, try p.typeStr(ty));
+                    try p.errStr(.generic_duplicate_here, @enumToInt(prev_tok), try p.typeStr(ty));
                 }
             }
             try p.list_buf.append(try p.addNode(.{

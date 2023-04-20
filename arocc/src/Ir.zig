@@ -388,12 +388,12 @@ pub fn dump(ir: Ir, gpa: Allocator, name: []const u8, color: bool, w: anytype) !
                 try ir.writeRef(&ref_map, @"switch".target, color, w);
                 if (color) util.setColor(.reset, w);
                 try w.writeAll(" {");
-                for (@"switch".case_vals[0..@"switch".cases_len], 0..) |val_ref, case_i| {
+                for (@"switch".case_vals[0..@"switch".cases_len], @"switch".case_labels) |val_ref, label_ref| {
                     try w.writeAll("\n        ");
                     try ir.writeValue(val_ref, color, w);
                     if (color) util.setColor(.reset, w);
                     try w.writeAll(" => ");
-                    try ir.writeLabel(&label_map, @"switch".case_labels[case_i], color, w);
+                    try ir.writeLabel(&label_map, label_ref, color, w);
                     if (color) util.setColor(.reset, w);
                 }
                 if (color) util.setColor(LITERAL, w);

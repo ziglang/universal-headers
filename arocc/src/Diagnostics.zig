@@ -2154,7 +2154,7 @@ const messages = struct {
         const kind = .@"error";
     };
     const bit_int_too_big = struct {
-        const msg = "{s} of bit sizes greater than 128 not supported";
+        const msg = "{s} of bit sizes greater than " ++ std.fmt.comptimePrint("{d}", .{Compilation.bit_int_max_bits}) ++ " not supported";
         const extra = .str;
         const kind = .@"error";
     };
@@ -2213,6 +2213,17 @@ const messages = struct {
         const msg = "unsupported argument '{s}' to option '-ffp-eval-method='; expected 'source', 'double', or 'extended'";
         const extra = .str;
         const kind = .@"error";
+    };
+    const suggest_pointer_for_invalid_fp16 = struct {
+        const msg = "{s} cannot have __fp16 type; did you forget * ?";
+        const extra = .str;
+        const kind = .@"error";
+    };
+    const bitint_suffix = struct {
+        const msg = "'_BitInt' suffix for literals is a C2x extension";
+        const opt = "c2x-extensions";
+        const kind = .warning;
+        const suppress_version = .c2x;
     };
 };
 

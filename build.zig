@@ -2,29 +2,20 @@ const std = @import("std");
 
 pub fn build(b: *std.build.Builder) void {
     const target = b.standardTargetOptions(.{});
-    const mode = b.standardOptimizeOption(.{});
+    const optimize = b.standardOptimizeOption(.{});
 
-    const libespresso = b.dependency("libespresso", .{
+    const arocc_dep = b.anonymousDependency("arocc", @import("arocc/build.zig"), .{
         .target = target,
-        .optimize = mode,
-    });
-    const libeqntott = b.dependency("libeqntott", .{
-        .target = target,
-        .optimize = mode,
+        .optimize = optimize,
     });
 
     const exe = b.addExecutable(.{
         .name = "universal-headers",
         .root_source_file = .{ .path = "src/main.zig" },
         .target = target,
-        .optimize = mode,
+        .optimize = optimize,
     });
-    exe.addAnonymousModule("arocc", .{
-        .source_file = .{ .path = "arocc/src/lib.zig" },
-    });
-    exe.linkLibrary(libespresso.artifact("espresso"));
-    exe.linkLibrary(libeqntott.artifact("eqntott-lib"));
-    exe.linkLibC();
+    exe.addModule("arocc", arocc_dep.module("aro"));
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);

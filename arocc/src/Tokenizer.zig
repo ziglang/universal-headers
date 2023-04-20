@@ -241,6 +241,7 @@ pub const Token = struct {
         keyword_imag2,
         keyword_real1,
         keyword_real2,
+        keyword_float16,
 
         // clang keywords
         keyword_fp16,
@@ -267,6 +268,7 @@ pub const Token = struct {
         builtin_va_arg,
         builtin_offsetof,
         builtin_bitoffsetof,
+        builtin_types_compatible_p,
 
         /// preprocessor number
         /// An optional period, followed by a digit 0-9, followed by any number of letters
@@ -362,6 +364,7 @@ pub const Token = struct {
                 .builtin_va_arg,
                 .builtin_offsetof,
                 .builtin_bitoffsetof,
+                .builtin_types_compatible_p,
                 .keyword_attribute1,
                 .keyword_attribute2,
                 .keyword_extension,
@@ -375,6 +378,7 @@ pub const Token = struct {
                 .keyword_imag2,
                 .keyword_real1,
                 .keyword_real2,
+                .keyword_float16,
                 .keyword_fp16,
                 .keyword_declspec,
                 .keyword_int64,
@@ -619,6 +623,7 @@ pub const Token = struct {
                 .builtin_va_arg => "__builtin_va_arg",
                 .builtin_offsetof => "__builtin_offsetof",
                 .builtin_bitoffsetof => "__builtin_bitoffsetof",
+                .builtin_types_compatible_p => "__builtin_types_compatible_p",
                 .keyword_attribute1 => "__attribute",
                 .keyword_attribute2 => "__attribute__",
                 .keyword_extension => "__extension__",
@@ -632,6 +637,7 @@ pub const Token = struct {
                 .keyword_imag2 => "__imag__",
                 .keyword_real1 => "__real",
                 .keyword_real2 => "__real__",
+                .keyword_float16 => "_Float16",
                 .keyword_fp16 => "__fp16",
                 .keyword_declspec => "__declspec",
                 .keyword_int64 => "__int64",
@@ -663,6 +669,7 @@ pub const Token = struct {
                 .builtin_va_arg,
                 .builtin_offsetof,
                 .builtin_bitoffsetof,
+                .builtin_types_compatible_p,
                 => "an identifier",
                 .string_literal,
                 .string_literal_utf_16,
@@ -899,6 +906,7 @@ pub const Token = struct {
         .{ "__imag__", .keyword_imag2 },
         .{ "__real", .keyword_real1 },
         .{ "__real__", .keyword_real2 },
+        .{ "_Float16", .keyword_float16 },
 
         // clang keywords
         .{ "__fp16", .keyword_fp16 },
@@ -925,6 +933,7 @@ pub const Token = struct {
         .{ "__builtin_va_arg", .builtin_va_arg },
         .{ "__builtin_offsetof", .builtin_offsetof },
         .{ "__builtin_bitoffsetof", .builtin_bitoffsetof },
+        .{ "__builtin_types_compatible_p", .builtin_types_compatible_p },
     });
 };
 

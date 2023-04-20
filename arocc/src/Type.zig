@@ -7,8 +7,8 @@ const Compilation = @import("Compilation.zig");
 const Attribute = @import("Attribute.zig");
 const StringInterner = @import("StringInterner.zig");
 const StringId = StringInterner.StringId;
-const Target = std.Target;
-const target_util = @import("target.zig");
+const CType = @import("zig").CType;
+const target = @import("target.zig");
 const LangOpts = @import("LangOpts.zig");
 const BuiltinFunction = @import("builtins/BuiltinFunction.zig");
 
@@ -311,12 +311,12 @@ pub const Specifier = enum {
 
     // floating point numbers
     fp16,
+    float16,
     float,
     double,
     long_double,
     float80,
     float128,
-    complex_fp16,
     complex_float,
     complex_double,
     complex_long_double,
@@ -500,7 +500,7 @@ pub fn isFloat(ty: Type) bool {
     return switch (ty.specifier) {
         // zig fmt: off
         .float, .double, .long_double, .complex_float, .complex_double, .complex_long_double,
-        .fp16, .float80, .float128, .complex_fp16, .complex_float80, .complex_float128 => true,
+        .fp16, .float16, .float80, .float128, .complex_float80, .complex_float128 => true,
         // zig fmt: on
         .typeof_type => ty.data.sub_type.isFloat(),
         .typeof_expr => ty.data.expr.ty.isFloat(),
@@ -512,7 +512,7 @@ pub fn isFloat(ty: Type) bool {
 pub fn isReal(ty: Type) bool {
     return switch (ty.specifier) {
         // zig fmt: off
-        .complex_float, .complex_double, .complex_long_double, .complex_fp16, .complex_float80,
+        .complex_float, .complex_double, .complex_long_double, .complex_float80,
         .complex_float128, .complex_char, .complex_schar, .complex_uchar, .complex_short,
         .complex_ushort, .complex_int, .complex_uint, .complex_long, .complex_ulong,
         .complex_long_long, .complex_ulong_long, .complex_int128, .complex_uint128,
@@ -554,7 +554,7 @@ pub fn isConst(ty: Type) bool {
 pub fn isUnsignedInt(ty: Type, comp: *const Compilation) bool {
     return switch (ty.specifier) {
         // zig fmt: off
-        .char, .complex_char => return target_util.getCharSignedness(comp.target) == .unsigned,
+        .char, .complex_char => return target.getCharSignedness(comp.target) == .unsigned,
         .uchar, .ushort, .uint, .ulong, .ulong_long, .bool, .complex_uchar, .complex_ushort,
         .complex_uint, .complex_ulong, .complex_ulong_long, .complex_uint128 => true,
         // zig fmt: on
@@ -677,29 +677,140 @@ pub fn getRecord(ty: Type) ?*const Type.Record {
     };
 }
 
+fn compareIntegerRanks(a: Type, b: Type, comp: *const Compilation) std.math.Order {
+    std.debug.assert(a.isInt() and b.isInt());
+    if (a.eql(b, comp, false)) return .eq;
+
+    const a_unsigned = a.isUnsignedInt(comp);
+    const b_unsigned = b.isUnsignedInt(comp);
+
+    const a_rank = a.integerRank(comp);
+    const b_rank = b.integerRank(comp);
+    if (a_unsigned == b_unsigned) {
+        return std.math.order(a_rank, b_rank);
+    }
+    if (a_unsigned) {
+        if (a_rank >= b_rank) return .gt;
+        return .lt;
+    }
+    std.debug.assert(b_unsigned);
+    if (b_rank >= a_rank) return .lt;
+    return .gt;
+}
+
+fn realIntegerConversion(a: Type, b: Type, comp: *const Compilation) Type {
+    std.debug.assert(a.isReal() and b.isReal());
+    const type_order = a.compareIntegerRanks(b, comp);
+    const a_signed = !a.isUnsignedInt(comp);
+    const b_signed = !b.isUnsignedInt(comp);
+    if (a_signed == b_signed) {
+        // If both have the same sign, use higher-rank type.
+        return switch (type_order) {
+            .lt => b,
+            .eq, .gt => a,
+        };
+    } else if (type_order != if (a_signed) std.math.Order.gt else std.math.Order.lt) {
+        // Only one is signed; and the unsigned type has rank >= the signed type
+        // Use the unsigned type
+        return if (b_signed) a else b;
+    } else if (a.bitSizeof(comp).? != b.bitSizeof(comp).?) {
+        // Signed type is higher rank and sizes are not equal
+        // Use the signed type
+        return if (a_signed) a else b;
+    } else {
+        // Signed type is higher rank but same size as unsigned type
+        // e.g. `long` and `unsigned` on x86-linux-gnu
+        // Use unsigned version of the signed type
+        return if (a_signed) a.makeIntegerUnsigned() else b.makeIntegerUnsigned();
+    }
+}
+
+pub fn makeIntegerUnsigned(ty: Type) Type {
+    // TODO discards attributed/typeof
+    var base = ty.canonicalize(.standard);
+    switch (base.specifier) {
+        // zig fmt: off
+        .uchar, .ushort, .uint, .ulong, .ulong_long, .uint128,
+        .complex_uchar, .complex_ushort, .complex_uint, .complex_ulong, .complex_ulong_long, .complex_uint128,
+        => return ty,
+        // zig fmt: on
+
+        .char, .complex_char => {
+            base.specifier = @intToEnum(Type.Specifier, @enumToInt(base.specifier) + 2);
+            return base;
+        },
+
+        // zig fmt: off
+        .schar, .short, .int, .long, .long_long, .int128,
+        .complex_schar, .complex_short, .complex_int, .complex_long, .complex_long_long, .complex_int128 => {
+            base.specifier = @intToEnum(Type.Specifier, @enumToInt(base.specifier) + 1);
+            return base;
+        },
+        // zig fmt: on
+
+        .bit_int, .complex_bit_int => {
+            base.data.int.signedness = .unsigned;
+            return base;
+        },
+        else => unreachable,
+    }
+}
+
+/// Find the common type of a and b for binary operations
+pub fn integerConversion(a: Type, b: Type, comp: *const Compilation) Type {
+    const a_real = a.isReal();
+    const b_real = b.isReal();
+    const target_ty = a.makeReal().realIntegerConversion(b.makeReal(), comp);
+    return if (a_real and b_real) target_ty else target_ty.makeComplex();
+}
+
 pub fn integerPromotion(ty: Type, comp: *Compilation) Type {
     var specifier = ty.specifier;
-    if (specifier == .@"enum") {
-        if (ty.hasIncompleteSize()) return .{ .specifier = .int };
-        specifier = ty.data.@"enum".tag_ty.specifier;
+    switch (specifier) {
+        .@"enum" => {
+            if (ty.hasIncompleteSize()) return .{ .specifier = .int };
+            specifier = ty.data.@"enum".tag_ty.specifier;
+        },
+        .bit_int, .complex_bit_int => return .{ .specifier = specifier, .data = ty.data },
+        else => {},
     }
-    return .{
-        .specifier = switch (specifier) {
-            // zig fmt: off
-            .bool, .char, .schar, .uchar, .short => .int,
-            .ushort => if (ty.sizeof(comp).? == sizeof(.{ .specifier = .int }, comp)) Specifier.uint else .int,
-            .int, .uint, .long, .ulong, .long_long, .ulong_long, .int128, .uint128, .complex_char,
-            .complex_schar, .complex_uchar, .complex_short, .complex_ushort, .complex_int,
-            .complex_uint, .complex_long, .complex_ulong, .complex_long_long, .complex_ulong_long,
-            .complex_int128, .complex_uint128, .bit_int, .complex_bit_int => specifier,
-            // zig fmt: on
-            .typeof_type => return ty.data.sub_type.integerPromotion(comp),
-            .typeof_expr => return ty.data.expr.ty.integerPromotion(comp),
-            .attributed => return ty.data.attributed.base.integerPromotion(comp),
-            .invalid => .invalid,
-            else => unreachable, // not an integer type
+    return switch (specifier) {
+        else => .{
+            .specifier = switch (specifier) {
+                // zig fmt: off
+                .bool, .char, .schar, .uchar, .short => .int,
+                .ushort => if (ty.sizeof(comp).? == sizeof(.{ .specifier = .int }, comp)) Specifier.uint else .int,
+                .int, .uint, .long, .ulong, .long_long, .ulong_long, .int128, .uint128, .complex_char,
+                .complex_schar, .complex_uchar, .complex_short, .complex_ushort, .complex_int,
+                .complex_uint, .complex_long, .complex_ulong, .complex_long_long, .complex_ulong_long,
+                .complex_int128, .complex_uint128 => specifier,
+                // zig fmt: on
+                .typeof_type => return ty.data.sub_type.integerPromotion(comp),
+                .typeof_expr => return ty.data.expr.ty.integerPromotion(comp),
+                .attributed => return ty.data.attributed.base.integerPromotion(comp),
+                .invalid => .invalid,
+                else => unreachable, // _BitInt, or not an integer type
+            },
         },
     };
+}
+
+/// Promote a bitfield. If `int` can hold all the values of the underlying field,
+/// promote to int. Otherwise, promote to unsigned int
+/// Returns null if no promotion is necessary
+pub fn bitfieldPromotion(ty: Type, comp: *Compilation, width: u32) ?Type {
+    const type_size_bits = ty.bitSizeof(comp).?;
+
+    // Note: GCC and clang will promote `long: 3` to int even though the C standard does not allow this
+    if (width < type_size_bits) {
+        return int;
+    }
+
+    if (width == type_size_bits) {
+        return if (ty.isUnsignedInt(comp)) .{ .specifier = .uint } else int;
+    }
+
+    return null;
 }
 
 pub fn hasIncompleteSize(ty: Type) bool {
@@ -821,7 +932,7 @@ pub fn sizeof(ty: Type, comp: *const Compilation) ?u64 {
         .ulong_long => @divExact(CType.sizeInBits(.ulonglong, comp.target), 8),
         .long_double => @divExact(CType.sizeInBits(.longdouble, comp.target), 8),
         .int128, .uint128 => 16,
-        .fp16 => 2,
+        .fp16, .float16 => 2,
         .float => @divExact(CType.sizeInBits(.float, comp.target), 8),
         .double => @divExact(CType.sizeInBits(.double, comp.target), 8),
         .float80 => 16,
@@ -832,7 +943,7 @@ pub fn sizeof(ty: Type, comp: *const Compilation) ?u64 {
         // zig fmt: off
         .complex_char, .complex_schar, .complex_uchar, .complex_short, .complex_ushort, .complex_int,
         .complex_uint, .complex_long, .complex_ulong, .complex_long_long, .complex_ulong_long,
-        .complex_int128, .complex_uint128, .complex_fp16, .complex_float, .complex_double,
+        .complex_int128, .complex_uint128, .complex_float, .complex_double,
         .complex_long_double, .complex_float80, .complex_float128, .complex_bit_int,
         => return 2 * ty.makeReal().sizeof(comp).?,
         // zig fmt: on
@@ -916,13 +1027,13 @@ pub fn alignof(ty: Type, comp: *const Compilation) u29 {
         .array,
         .vector,
         => ty.elemType().alignof(comp),
-        .func, .var_args_func, .old_style_func => target_util.defaultFunctionAlignment(comp.target),
+        .func, .var_args_func, .old_style_func => target.defaultFunctionAlignment(comp.target),
         .char, .schar, .uchar, .void, .bool => 1,
 
         // zig fmt: off
         .complex_char, .complex_schar, .complex_uchar, .complex_short, .complex_ushort, .complex_int,
         .complex_uint, .complex_long, .complex_ulong, .complex_long_long, .complex_ulong_long,
-        .complex_int128, .complex_uint128, .complex_fp16, .complex_float, .complex_double,
+        .complex_int128, .complex_uint128, .complex_float, .complex_double,
         .complex_long_double, .complex_float80, .complex_float128, .complex_bit_int,
         => return ty.makeReal().alignof(comp),
         // zig fmt: on
@@ -947,7 +1058,7 @@ pub fn alignof(ty: Type, comp: *const Compilation) u29 {
         .long_double => CType.longdouble.alignment(comp.target),
 
         .int128, .uint128 => if (comp.target.cpu.arch == .s390x and comp.target.os.tag == .linux and comp.target.isGnu()) 8 else 16,
-        .fp16 => 2,
+        .fp16, .float16 => 2,
 
         .float80, .float128 => 16,
         .pointer,
@@ -1026,7 +1137,7 @@ pub fn requestedAlignment(ty: Type, comp: *const Compilation) ?u29 {
 
 pub fn enumIsPacked(ty: Type, comp: *const Compilation) bool {
     std.debug.assert(ty.is(.@"enum"));
-    return comp.langopts.short_enums or target_util.packAllEnums(comp.target) or ty.hasAttribute(.@"packed");
+    return comp.langopts.short_enums or target.packAllEnums(comp.target) or ty.hasAttribute(.@"packed");
 }
 
 pub fn annotationAlignment(comp: *const Compilation, attrs: ?[]const Attribute) ?u29 {
@@ -1035,12 +1146,37 @@ pub fn annotationAlignment(comp: *const Compilation, attrs: ?[]const Attribute) 
     var max_requested: ?u29 = null;
     for (a) |attribute| {
         if (attribute.tag != .aligned) continue;
-        const requested = if (attribute.args.aligned.alignment) |alignment| alignment.requested else target_util.defaultAlignment(comp.target);
+        const requested = if (attribute.args.aligned.alignment) |alignment| alignment.requested else target.defaultAlignment(comp.target);
         if (max_requested == null or max_requested.? < requested) {
             max_requested = requested;
         }
     }
     return max_requested;
+}
+
+/// Checks type compatibility for __builtin_types_compatible_p
+/// Returns true if the unqualified version of `a_param` and `b_param` are the same
+/// Ignores top-level qualifiers (e.g. `int` and `const int` are compatible) but `int *` and `const int *` are not
+/// Two types that are typedefed are considered compatible if their underlying types are compatible.
+/// An enum type is not considered to be compatible with another enum type even if both are compatible with the same integer type;
+/// `A[]` and `A[N]` for a type `A` and integer `N` are compatible
+pub fn compatible(a_param: Type, b_param: Type, comp: *const Compilation) bool {
+    var a_unqual = a_param.canonicalize(.standard);
+    a_unqual.qual.@"const" = false;
+    a_unqual.qual.@"volatile" = false;
+    var b_unqual = b_param.canonicalize(.standard);
+    b_unqual.qual.@"const" = false;
+    b_unqual.qual.@"volatile" = false;
+
+    if (a_unqual.eql(b_unqual, comp, true)) return true;
+    if (!a_unqual.isArray() or !b_unqual.isArray()) return false;
+
+    if (a_unqual.arrayLen() == null or b_unqual.arrayLen() == null) {
+        // incomplete arrays are compatible with arrays of the same element type
+        // GCC and clang ignore cv-qualifiers on arrays
+        return a_unqual.elemType().compatible(b_unqual.elemType(), comp);
+    }
+    return false;
 }
 
 pub fn eql(a_param: Type, b_param: Type, comp: *const Compilation, check_qualifiers: bool) bool {
@@ -1079,11 +1215,11 @@ pub fn eql(a_param: Type, b_param: Type, comp: *const Compilation, check_qualifi
             if (a.data.func.params.len != b.data.func.params.len) return false;
             // return type cannot have qualifiers
             if (!a.returnType().eql(b.returnType(), comp, false)) return false;
-            for (a.data.func.params, 0..) |param, i| {
+            for (a.data.func.params, b.data.func.params) |param, b_qual| {
                 var a_unqual = param.ty;
                 a_unqual.qual.@"const" = false;
                 a_unqual.qual.@"volatile" = false;
-                var b_unqual = b.data.func.params[i].ty;
+                var b_unqual = b_qual.ty;
                 b_unqual.qual.@"const" = false;
                 b_unqual.qual.@"volatile" = false;
                 if (!a_unqual.eql(b_unqual, comp, check_qualifiers)) return false;
@@ -1102,6 +1238,7 @@ pub fn eql(a_param: Type, b_param: Type, comp: *const Compilation, check_qualifi
 
         .@"struct", .@"union" => if (a.data.record != b.data.record) return false,
         .@"enum" => if (a.data.@"enum" != b.data.@"enum") return false,
+        .bit_int, .complex_bit_int => return a.data.int.bits == b.data.int.bits and a.data.int.signedness == b.data.int.signedness,
 
         else => {},
     }
@@ -1121,12 +1258,48 @@ pub fn originalTypeOfDecayedArray(ty: Type) Type {
     return copy;
 }
 
+/// Rank for floating point conversions, ignoring domain (complex vs real)
+/// Asserts that ty is a floating point type
+pub fn floatRank(ty: Type) usize {
+    const real = ty.makeReal();
+    return switch (real.specifier) {
+        // TODO: bfloat16 => 0
+        .float16 => 1,
+        .fp16 => 2,
+        .float => 3,
+        .double => 4,
+        .long_double => 5,
+        .float128 => 6,
+        // TODO: ibm128 => 7
+        else => unreachable,
+    };
+}
+
+/// Rank for integer conversions, ignoring domain (complex vs real)
+/// Asserts that ty is an integer type
+pub fn integerRank(ty: Type, comp: *const Compilation) usize {
+    const real = ty.makeReal();
+    return @intCast(usize, switch (real.specifier) {
+        .bit_int => @as(u64, real.data.int.bits) << 3,
+
+        .bool => 1 + (ty.bitSizeof(comp).? << 3),
+        .char, .schar, .uchar => 2 + (ty.bitSizeof(comp).? << 3),
+        .short, .ushort => 3 + (ty.bitSizeof(comp).? << 3),
+        .int, .uint => 4 + (ty.bitSizeof(comp).? << 3),
+        .long, .ulong => 5 + (ty.bitSizeof(comp).? << 3),
+        .long_long, .ulong_long => 6 + (ty.bitSizeof(comp).? << 3),
+        .int128, .uint128 => 7 + (ty.bitSizeof(comp).? << 3),
+
+        else => unreachable,
+    });
+}
+
 pub fn makeReal(ty: Type) Type {
     // TODO discards attributed/typeof
     var base = ty.canonicalize(.standard);
     switch (base.specifier) {
-        .complex_fp16, .complex_float, .complex_double, .complex_long_double, .complex_float80, .complex_float128 => {
-            base.specifier = @intToEnum(Type.Specifier, @enumToInt(base.specifier) - 6);
+        .complex_float, .complex_double, .complex_long_double, .complex_float80, .complex_float128 => {
+            base.specifier = @intToEnum(Type.Specifier, @enumToInt(base.specifier) - 5);
             return base;
         },
         .complex_char, .complex_schar, .complex_uchar, .complex_short, .complex_ushort, .complex_int, .complex_uint, .complex_long, .complex_ulong, .complex_long_long, .complex_ulong_long, .complex_int128, .complex_uint128 => {
@@ -1145,8 +1318,8 @@ pub fn makeComplex(ty: Type) Type {
     // TODO discards attributed/typeof
     var base = ty.canonicalize(.standard);
     switch (base.specifier) {
-        .fp16, .float, .double, .long_double, .float80, .float128 => {
-            base.specifier = @intToEnum(Type.Specifier, @enumToInt(base.specifier) + 6);
+        .float, .double, .long_double, .float80, .float128 => {
+            base.specifier = @intToEnum(Type.Specifier, @enumToInt(base.specifier) + 5);
             return base;
         },
         .char, .schar, .uchar, .short, .ushort, .int, .uint, .long, .ulong, .long_long, .ulong_long, .int128, .uint128 => {
@@ -1230,6 +1403,9 @@ pub fn validateCombinedType(ty: Type, p: *Parser, source_tok: TokenIndex) Parser
             if (ret_ty.qual.atomic) {
                 try p.errStr(.qual_on_ret_type, source_tok, "atomic");
                 ret_ty.qual.atomic = false;
+            }
+            if (ret_ty.is(.fp16) and !p.comp.hasHalfPrecisionFloatABI()) {
+                try p.errStr(.suggest_pointer_for_invalid_fp16, source_tok, "function return value");
             }
         },
         .typeof_type, .decayed_typeof_type => return ty.data.sub_type.validateCombinedType(p, source_tok),
@@ -1326,13 +1502,13 @@ pub const Builder = struct {
         complex_ubit_int: i16,
 
         fp16,
+        float16,
         float,
         double,
         long_double,
         float80,
         float128,
         complex,
-        complex_fp16,
         complex_float,
         complex_double,
         complex_long_double,
@@ -1436,13 +1612,13 @@ pub const Builder = struct {
                 .complex_ubit_int => "_Complex unsigned _BitInt",
 
                 .fp16 => "__fp16",
+                .float16 => "_Float16",
                 .float => "float",
                 .double => "double",
                 .long_double => "long double",
                 .float80 => "__float80",
                 .float128 => "__float128",
                 .complex => "_Complex",
-                .complex_fp16 => "_Complex __fp16",
                 .complex_float => "_Complex float",
                 .complex_double => "_Complex double",
                 .complex_long_double => "_Complex long double",
@@ -1548,7 +1724,7 @@ pub const Builder = struct {
                         return error.ParsingFailed;
                     }
                 }
-                if (bits > 128) {
+                if (bits > Compilation.bit_int_max_bits) {
                     try p.errStr(.bit_int_too_big, b.bit_int_tok.?, b.specifier.str(p.comp.langopts).?);
                     return error.ParsingFailed;
                 }
@@ -1560,12 +1736,12 @@ pub const Builder = struct {
             },
 
             .fp16 => ty.specifier = .fp16,
+            .float16 => ty.specifier = .float16,
             .float => ty.specifier = .float,
             .double => ty.specifier = .double,
             .long_double => ty.specifier = .long_double,
             .float80 => ty.specifier = .float80,
             .float128 => ty.specifier = .float128,
-            .complex_fp16 => ty.specifier = .complex_fp16,
             .complex_float => ty.specifier = .complex_float,
             .complex_double => ty.specifier = .complex_double,
             .complex_long_double => ty.specifier = .complex_long_double,
@@ -1669,7 +1845,9 @@ pub const Builder = struct {
                 ty.data = .{ .attributed = data };
             },
         }
-        if (!ty.isReal() and ty.isInt()) try p.errTok(.complex_int, b.complex_tok.?);
+        if (!ty.isReal() and ty.isInt()) {
+            if (b.complex_tok) |tok| try p.errTok(.complex_int, tok);
+        }
         try b.qual.finish(p, &ty);
         return ty;
     }
@@ -1735,7 +1913,7 @@ pub const Builder = struct {
         if (new == .complex) b.complex_tok = source_tok;
         if (new == .bit_int) b.bit_int_tok = source_tok;
 
-        if (new == .int128 and !target_util.hasInt128(p.comp.target)) {
+        if (new == .int128 and !target.hasInt128(p.comp.target)) {
             try p.errStr(.type_not_supported_on_target, source_tok, "__int128");
         }
 
@@ -1922,7 +2100,10 @@ pub const Builder = struct {
             },
             .fp16 => b.specifier = switch (b.specifier) {
                 .none => .fp16,
-                .complex => .complex_fp16,
+                else => return b.cannotCombine(p, source_tok),
+            },
+            .float16 => b.specifier = switch (b.specifier) {
+                .none => .float16,
                 else => return b.cannotCombine(p, source_tok),
             },
             .float => b.specifier = switch (b.specifier) {
@@ -1949,7 +2130,6 @@ pub const Builder = struct {
             },
             .complex => b.specifier = switch (b.specifier) {
                 .none => .complex,
-                .fp16 => .complex_fp16,
                 .float => .complex_float,
                 .double => .complex_double,
                 .long_double => .complex_long_double,
@@ -1988,7 +2168,6 @@ pub const Builder = struct {
                 .sbit_int => |bits| .{ .complex_sbit_int = bits },
                 .ubit_int => |bits| .{ .complex_ubit_int = bits },
                 .complex,
-                .complex_fp16,
                 .complex_float,
                 .complex_double,
                 .complex_long_double,
@@ -2074,12 +2253,12 @@ pub const Builder = struct {
                 return .{ .complex_bit_int = ty.data.int.bits };
             },
             .fp16 => .fp16,
+            .float16 => .float16,
             .float => .float,
             .double => .double,
             .float80 => .float80,
             .float128 => .float128,
             .long_double => .long_double,
-            .complex_fp16 => .complex_fp16,
             .complex_float => .complex_float,
             .complex_double => .complex_double,
             .complex_long_double => .complex_long_double,
@@ -2135,6 +2314,32 @@ pub fn hasAttribute(ty: Type, tag: Attribute.Tag) bool {
         if (attr.tag == tag) return true;
     }
     return false;
+}
+
+/// Suffix for integer values of this type
+pub fn intValueSuffix(ty: Type, comp: *const Compilation) []const u8 {
+    return switch (ty.specifier) {
+        .schar, .short, .int => "",
+        .long => "L",
+        .long_long => "LL",
+        .uchar, .char => {
+            if (ty.specifier == .char and target.getCharSignedness(comp.target) == .signed) return "";
+            // Only 8-bit char supported currently;
+            // TODO: handle platforms with 16-bit int + 16-bit char
+            std.debug.assert(ty.sizeof(comp).? == 8);
+            return "";
+        },
+        .ushort => {
+            if (ty.sizeof(comp).? < int.sizeof(comp).?) {
+                return "";
+            }
+            return "U";
+        },
+        .uint => "U",
+        .ulong => "UL",
+        .ulong_long => "ULL",
+        else => unreachable, // not integer
+    };
 }
 
 /// Print type in C style
@@ -2384,7 +2589,12 @@ pub fn dump(ty: Type, mapper: StringInterner.TypeMapper, langopts: LangOpts, w: 
             try ty.data.attributed.base.dump(mapper, langopts, w);
             try w.writeAll(")");
         },
-        else => try w.writeAll(Builder.fromType(ty).str(langopts).?),
+        else => {
+            try w.writeAll(Builder.fromType(ty).str(langopts).?);
+            if (ty.specifier == .bit_int or ty.specifier == .complex_bit_int) {
+                try w.print("({d})", .{ty.data.int.bits});
+            }
+        },
     }
 }
 
@@ -2405,549 +2615,3 @@ fn dumpRecord(record: *Record, mapper: StringInterner.TypeMapper, langopts: Lang
     }
     try w.writeAll(" }");
 }
-
-pub const CType = enum {
-    short,
-    ushort,
-    int,
-    uint,
-    long,
-    ulong,
-    longlong,
-    ulonglong,
-    longdouble,
-
-    // We don't have a `c_float`/`c_double` type in Zig, but these
-    // are useful for querying target-correct alignment and checking
-    // whether C's double is f64 or f32
-    float,
-    double,
-
-    pub fn ptrBitWidth(target: Target) u16 {
-        switch (target.abi) {
-            .gnux32, .muslx32, .gnuabin32, .gnuilp32 => return 32,
-            .gnuabi64 => return 64,
-            else => {},
-        }
-        switch (target.cpu.arch) {
-            .sparc => if (std.Target.sparc.featureSetHas(target.cpu.features, .v9)) return 64,
-            else => {},
-        }
-        return target.cpu.arch.ptrBitWidth();
-    }
-
-    pub fn sizeInBits(self: CType, target: Target) u16 {
-        switch (target.os.tag) {
-            .freestanding, .other => switch (target.cpu.arch) {
-                .msp430 => switch (self) {
-                    .short, .ushort, .int, .uint => return 16,
-                    .float, .long, .ulong => return 32,
-                    .longlong, .ulonglong, .double, .longdouble => return 64,
-                },
-                .avr => switch (self) {
-                    .short, .ushort, .int, .uint => return 16,
-                    .long, .ulong, .float, .double, .longdouble => return 32,
-                    .longlong, .ulonglong => return 64,
-                },
-                .tce, .tcele => switch (self) {
-                    .short, .ushort => return 16,
-                    .int, .uint, .long, .ulong, .longlong, .ulonglong => return 32,
-                    .float, .double, .longdouble => return 32,
-                },
-                .mips64, .mips64el => switch (self) {
-                    .short, .ushort => return 16,
-                    .int, .uint, .float => return 32,
-                    .long, .ulong => return if (target.abi != .gnuabin32) 64 else 32,
-                    .longlong, .ulonglong, .double => return 64,
-                    .longdouble => return 128,
-                },
-                .x86_64 => switch (self) {
-                    .short, .ushort => return 16,
-                    .int, .uint, .float => return 32,
-                    .long, .ulong => switch (target.abi) {
-                        .gnux32, .muslx32 => return 32,
-                        else => return 64,
-                    },
-                    .longlong, .ulonglong, .double => return 64,
-                    .longdouble => return 80,
-                },
-                else => switch (self) {
-                    .short, .ushort => return 16,
-                    .int, .uint, .float => return 32,
-                    .long, .ulong => return ptrBitWidth(target),
-                    .longlong, .ulonglong, .double => return 64,
-                    .longdouble => switch (target.cpu.arch) {
-                        .x86 => switch (target.abi) {
-                            .android => return 64,
-                            else => return 80,
-                        },
-
-                        .powerpc,
-                        .powerpcle,
-                        .powerpc64,
-                        .powerpc64le,
-                        => switch (target.abi) {
-                            .musl,
-                            .musleabi,
-                            .musleabihf,
-                            .muslx32,
-                            => return 64,
-                            else => return 128,
-                        },
-
-                        .riscv32,
-                        .riscv64,
-                        .aarch64,
-                        .aarch64_be,
-                        .aarch64_32,
-                        .s390x,
-                        .sparc,
-                        .sparc64,
-                        .sparcel,
-                        .wasm32,
-                        .wasm64,
-                        => return 128,
-
-                        else => return 64,
-                    },
-                },
-            },
-
-            .linux,
-            .freebsd,
-            .netbsd,
-            .dragonfly,
-            .openbsd,
-            .wasi,
-            .emscripten,
-            .plan9,
-            .solaris,
-            .haiku,
-            .ananas,
-            .fuchsia,
-            .minix,
-            => switch (target.cpu.arch) {
-                .msp430 => switch (self) {
-                    .short, .ushort, .int, .uint => return 16,
-                    .long, .ulong, .float => return 32,
-                    .longlong, .ulonglong, .double, .longdouble => return 64,
-                },
-                .avr => switch (self) {
-                    .short, .ushort, .int, .uint => return 16,
-                    .long, .ulong, .float, .double, .longdouble => return 32,
-                    .longlong, .ulonglong => return 64,
-                },
-                .tce, .tcele => switch (self) {
-                    .short, .ushort => return 16,
-                    .int, .uint, .long, .ulong, .longlong, .ulonglong => return 32,
-                    .float, .double, .longdouble => return 32,
-                },
-                .mips64, .mips64el => switch (self) {
-                    .short, .ushort => return 16,
-                    .int, .uint, .float => return 32,
-                    .long, .ulong => return if (target.abi != .gnuabin32) 64 else 32,
-                    .longlong, .ulonglong, .double => return 64,
-                    .longdouble => if (target.os.tag == .freebsd) return 64 else return 128,
-                },
-                .x86_64 => switch (self) {
-                    .short, .ushort => return 16,
-                    .int, .uint, .float => return 32,
-                    .long, .ulong => switch (target.abi) {
-                        .gnux32, .muslx32 => return 32,
-                        else => return 64,
-                    },
-                    .longlong, .ulonglong, .double => return 64,
-                    .longdouble => return 80,
-                },
-                else => switch (self) {
-                    .short, .ushort => return 16,
-                    .int, .uint, .float => return 32,
-                    .long, .ulong => return ptrBitWidth(target),
-                    .longlong, .ulonglong, .double => return 64,
-                    .longdouble => switch (target.cpu.arch) {
-                        .x86 => switch (target.abi) {
-                            .android => return 64,
-                            else => return 80,
-                        },
-
-                        .powerpc,
-                        .powerpcle,
-                        => switch (target.abi) {
-                            .musl,
-                            .musleabi,
-                            .musleabihf,
-                            .muslx32,
-                            => return 64,
-                            else => switch (target.os.tag) {
-                                .freebsd, .netbsd, .openbsd => return 64,
-                                else => return 128,
-                            },
-                        },
-
-                        .powerpc64,
-                        .powerpc64le,
-                        => switch (target.abi) {
-                            .musl,
-                            .musleabi,
-                            .musleabihf,
-                            .muslx32,
-                            => return 64,
-                            else => switch (target.os.tag) {
-                                .freebsd, .openbsd => return 64,
-                                else => return 128,
-                            },
-                        },
-
-                        .riscv32,
-                        .riscv64,
-                        .aarch64,
-                        .aarch64_be,
-                        .aarch64_32,
-                        .s390x,
-                        .mips64,
-                        .mips64el,
-                        .sparc,
-                        .sparc64,
-                        .sparcel,
-                        .wasm32,
-                        .wasm64,
-                        => return 128,
-
-                        else => return 64,
-                    },
-                },
-            },
-
-            .windows, .uefi => switch (target.cpu.arch) {
-                .x86 => switch (self) {
-                    .short, .ushort => return 16,
-                    .int, .uint, .float => return 32,
-                    .long, .ulong => return 32,
-                    .longlong, .ulonglong, .double => return 64,
-                    .longdouble => switch (target.abi) {
-                        .gnu, .gnuilp32, .cygnus => return 80,
-                        else => return 64,
-                    },
-                },
-                .x86_64 => switch (self) {
-                    .short, .ushort => return 16,
-                    .int, .uint, .float => return 32,
-                    .long, .ulong => switch (target.abi) {
-                        .cygnus => return 64,
-                        else => return 32,
-                    },
-                    .longlong, .ulonglong, .double => return 64,
-                    .longdouble => switch (target.abi) {
-                        .gnu, .gnuilp32, .cygnus => return 80,
-                        else => return 64,
-                    },
-                },
-                else => switch (self) {
-                    .short, .ushort => return 16,
-                    .int, .uint, .float => return 32,
-                    .long, .ulong => return 32,
-                    .longlong, .ulonglong, .double => return 64,
-                    .longdouble => return 64,
-                },
-            },
-
-            .macos, .ios, .tvos, .watchos => switch (self) {
-                .short, .ushort => return 16,
-                .int, .uint, .float => return 32,
-                .long, .ulong => switch (target.cpu.arch) {
-                    .x86, .arm, .aarch64_32 => return 32,
-                    .x86_64 => switch (target.abi) {
-                        .gnux32, .muslx32 => return 32,
-                        else => return 64,
-                    },
-                    else => return 64,
-                },
-                .longlong, .ulonglong, .double => return 64,
-                .longdouble => switch (target.cpu.arch) {
-                    .x86 => switch (target.abi) {
-                        .android => return 64,
-                        else => return 80,
-                    },
-                    .x86_64 => return 80,
-                    else => return 64,
-                },
-            },
-
-            .nvcl, .cuda => switch (self) {
-                .short, .ushort => return 16,
-                .int, .uint, .float => return 32,
-                .long, .ulong => switch (target.cpu.arch) {
-                    .nvptx => return 32,
-                    .nvptx64 => return 64,
-                    else => return 64,
-                },
-                .longlong, .ulonglong, .double => return 64,
-                .longdouble => return 64,
-            },
-
-            .amdhsa, .amdpal => switch (self) {
-                .short, .ushort => return 16,
-                .int, .uint, .float => return 32,
-                .long, .ulong, .longlong, .ulonglong, .double => return 64,
-                .longdouble => return 128,
-            },
-
-            .cloudabi,
-            .kfreebsd,
-            .lv2,
-            .zos,
-            .rtems,
-            .nacl,
-            .aix,
-            .ps4,
-            .ps5,
-            .elfiamcu,
-            .mesa3d,
-            .contiki,
-            .hermit,
-            .hurd,
-            .opencl,
-            .glsl450,
-            .vulkan,
-            .driverkit,
-            .shadermodel,
-            => @panic("TODO specify the C integer and float type sizes for this OS"),
-        }
-    }
-
-    pub fn alignment(self: CType, target: Target) u16 {
-
-        // Overrides for unusual alignments
-        switch (target.cpu.arch) {
-            .avr => return 1,
-            .x86 => switch (target.os.tag) {
-                .windows, .uefi => switch (self) {
-                    .longlong, .ulonglong, .double => return 8,
-                    .longdouble => switch (target.abi) {
-                        .gnu, .gnuilp32, .cygnus => return 4,
-                        else => return 8,
-                    },
-                    else => {},
-                },
-                else => {},
-            },
-            else => {},
-        }
-
-        // Next-power-of-two-aligned, up to a maximum.
-        return @min(
-            std.math.ceilPowerOfTwoAssert(u16, (self.sizeInBits(target) + 7) / 8),
-            switch (target.cpu.arch) {
-                .arm, .armeb, .thumb, .thumbeb => switch (target.os.tag) {
-                    .netbsd => switch (target.abi) {
-                        .gnueabi,
-                        .gnueabihf,
-                        .eabi,
-                        .eabihf,
-                        .android,
-                        .musleabi,
-                        .musleabihf,
-                        => 8,
-
-                        else => @as(u16, 4),
-                    },
-                    .ios, .tvos, .watchos => 4,
-                    else => 8,
-                },
-
-                .msp430,
-                .avr,
-                => 2,
-
-                .arc,
-                .csky,
-                .x86,
-                .xcore,
-                .dxil,
-                .loongarch32,
-                .tce,
-                .tcele,
-                .le32,
-                .amdil,
-                .hsail,
-                .spir,
-                .spirv32,
-                .kalimba,
-                .shave,
-                .renderscript32,
-                .ve,
-                .spu_2,
-                => 4,
-
-                .aarch64_32,
-                .amdgcn,
-                .amdil64,
-                .bpfel,
-                .bpfeb,
-                .hexagon,
-                .hsail64,
-                .loongarch64,
-                .m68k,
-                .mips,
-                .mipsel,
-                .sparc,
-                .sparcel,
-                .sparc64,
-                .lanai,
-                .le64,
-                .nvptx,
-                .nvptx64,
-                .r600,
-                .s390x,
-                .spir64,
-                .spirv64,
-                .renderscript64,
-                => 8,
-
-                .aarch64,
-                .aarch64_be,
-                .mips64,
-                .mips64el,
-                .powerpc,
-                .powerpcle,
-                .powerpc64,
-                .powerpc64le,
-                .riscv32,
-                .riscv64,
-                .x86_64,
-                .wasm32,
-                .wasm64,
-                => 16,
-
-                .xtensa => @panic("TODO"),
-            },
-        );
-    }
-
-    /// Preferred alignment reported by GNU `__alignof__`
-    pub fn preferredAlignment(self: CType, target: Target) u16 {
-
-        // Overrides for unusual alignments
-        switch (target.cpu.arch) {
-            .arm, .armeb, .thumb, .thumbeb => switch (target.os.tag) {
-                .netbsd => switch (target.abi) {
-                    .gnueabi,
-                    .gnueabihf,
-                    .eabi,
-                    .eabihf,
-                    .android,
-                    .musleabi,
-                    .musleabihf,
-                    => {},
-
-                    else => switch (self) {
-                        .longdouble => return 4,
-                        else => {},
-                    },
-                },
-                .ios, .tvos, .watchos => switch (self) {
-                    .longdouble => return 4,
-                    else => {},
-                },
-                else => {},
-            },
-            .arc => switch (self) {
-                .longdouble => return 4,
-                else => {},
-            },
-            .avr => switch (self) {
-                .int, .uint, .long, .ulong, .float, .longdouble => return 1,
-                .short, .ushort => return 2,
-                .double => return 4,
-                .longlong, .ulonglong => return 8,
-            },
-            .x86 => switch (target.os.tag) {
-                .windows, .uefi => switch (self) {
-                    .longdouble => switch (target.abi) {
-                        .gnu, .gnuilp32, .cygnus => return 4,
-                        else => return 8,
-                    },
-                    else => {},
-                },
-                else => switch (self) {
-                    .longdouble => return 4,
-                    else => {},
-                },
-            },
-            else => {},
-        }
-
-        // Next-power-of-two-aligned, up to a maximum.
-        return @min(
-            std.math.ceilPowerOfTwoAssert(u16, (self.sizeInBits(target) + 7) / 8),
-            switch (target.cpu.arch) {
-                .msp430 => @as(u16, 2),
-
-                .csky,
-                .xcore,
-                .dxil,
-                .loongarch32,
-                .tce,
-                .tcele,
-                .le32,
-                .amdil,
-                .hsail,
-                .spir,
-                .spirv32,
-                .kalimba,
-                .shave,
-                .renderscript32,
-                .ve,
-                .spu_2,
-                => 4,
-
-                .arc,
-                .arm,
-                .armeb,
-                .avr,
-                .thumb,
-                .thumbeb,
-                .aarch64_32,
-                .amdgcn,
-                .amdil64,
-                .bpfel,
-                .bpfeb,
-                .hexagon,
-                .hsail64,
-                .x86,
-                .loongarch64,
-                .m68k,
-                .mips,
-                .mipsel,
-                .sparc,
-                .sparcel,
-                .sparc64,
-                .lanai,
-                .le64,
-                .nvptx,
-                .nvptx64,
-                .r600,
-                .s390x,
-                .spir64,
-                .spirv64,
-                .renderscript64,
-                => 8,
-
-                .aarch64,
-                .aarch64_be,
-                .mips64,
-                .mips64el,
-                .powerpc,
-                .powerpcle,
-                .powerpc64,
-                .powerpc64le,
-                .riscv32,
-                .riscv64,
-                .x86_64,
-                .wasm32,
-                .wasm64,
-                => 16,
-            },
-        );
-    }
-};

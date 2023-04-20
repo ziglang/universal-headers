@@ -3,7 +3,7 @@ const mem = std.mem;
 const Allocator = mem.Allocator;
 const assert = std.debug.assert;
 const Compilation = @import("Compilation.zig");
-const Error = Compilation.Error || error{UnexpectedMacro};
+const Error = Compilation.Error;
 const Source = @import("Source.zig");
 const Tokenizer = @import("Tokenizer.zig");
 const RawToken = Tokenizer.Token;
@@ -47,12 +47,12 @@ const Macro = struct {
     fn eql(a: Macro, b: Macro, pp: *Preprocessor) bool {
         if (a.tokens.len != b.tokens.len) return false;
         if (a.is_builtin != b.is_builtin) return false;
-        for (a.tokens, 0..) |t, i| if (!tokEql(pp, t, b.tokens[i])) return false;
+        for (a.tokens, b.tokens) |a_tok, b_tok| if (!tokEql(pp, a_tok, b_tok)) return false;
 
         if (a.is_func and b.is_func) {
             if (a.var_args != b.var_args) return false;
             if (a.params.len != b.params.len) return false;
-            for (a.params, 0..) |p, i| if (!mem.eql(u8, p, b.params[i])) return false;
+            for (a.params, b.params) |a_param, b_param| if (!mem.eql(u8, a_param, b_param)) return false;
         }
 
         return true;
@@ -67,8 +67,6 @@ comp: *Compilation,
 gpa: mem.Allocator,
 arena: std.heap.ArenaAllocator,
 defines: DefineMap,
-ok_defines: std.StringHashMapUnmanaged(void) = .{},
-unexpected_macro: []const u8 = undefined,
 tokens: Token.List = .{},
 token_buf: RawTokenList,
 char_buf: std.ArrayList(u8),
@@ -211,7 +209,7 @@ pub fn preprocess(pp: *Preprocessor, source: Source) Error!Token {
 }
 
 /// Return the name of the #ifndef guard macro that starts a source, if any.
-fn findIncludeGuard(pp: *Preprocessor, source: Source) ?[]const u8 {
+pub fn findIncludeGuard(pp: *Preprocessor, source: Source) ?[]const u8 {
     var tokenizer = Tokenizer{
         .buf = source.buf,
         .comp = pp.comp,
@@ -310,10 +308,6 @@ fn preprocessExtra(pp: *Preprocessor, source: Source) MacroError!Token {
                         if_level = ov[0];
 
                         const macro_name = (try pp.expectMacroName(&tokenizer)) orelse continue;
-                        if (pp.ok_defines.count() != 0 and !pp.ok_defines.contains(macro_name)) {
-                            pp.unexpected_macro = macro_name;
-                            return error.UnexpectedMacro;
-                        }
                         try pp.expectNl(&tokenizer);
                         if (pp.defines.get(macro_name) != null) {
                             if_kind.set(if_level, until_endif);
@@ -335,10 +329,6 @@ fn preprocessExtra(pp: *Preprocessor, source: Source) MacroError!Token {
                         if_level = ov[0];
 
                         const macro_name = (try pp.expectMacroName(&tokenizer)) orelse continue;
-                        if (pp.ok_defines.count() != 0 and !pp.ok_defines.contains(macro_name)) {
-                            pp.unexpected_macro = macro_name;
-                            return error.UnexpectedMacro;
-                        }
                         try pp.expectNl(&tokenizer);
                         if (pp.defines.get(macro_name) == null) {
                             if_kind.set(if_level, until_endif);
@@ -530,7 +520,7 @@ fn tokFromRaw(raw: RawToken) Token {
     };
 }
 
-fn err(pp: *Preprocessor, raw: RawToken, tag: Diagnostics.Tag) !void {
+pub fn err(pp: *Preprocessor, raw: RawToken, tag: Diagnostics.Tag) !void {
     try pp.comp.diag.add(.{
         .tag = tag,
         .loc = .{

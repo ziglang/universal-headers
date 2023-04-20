@@ -242,7 +242,8 @@ pub const CastKind = enum(u8) {
 };
 
 pub const Tag = enum(u8) {
-    /// Only appears at index 0 and reaching it is always a result of a bug.
+    /// Must appear at index 0. Also used as the tag for __builtin_types_compatible_p arguments, since the arguments are types
+    /// Reaching it is always the result of a bug.
     invalid,
 
     // ====== Decl ======
@@ -470,6 +471,8 @@ pub const Tag = enum(u8) {
     int_literal,
     /// Same as int_literal, but originates from a char literal
     char_literal,
+    /// _Float16 literal
+    float16_literal,
     /// f32 literal
     float_literal,
     /// f64 literal
@@ -492,6 +495,8 @@ pub const Tag = enum(u8) {
     generic_default_expr,
     /// __builtin_choose_expr(lhs, data[0], data[1])
     builtin_choose_expr,
+    /// __builtin_types_compatible_p(lhs, rhs)
+    builtin_types_compatible_p,
     /// decl - special builtins require custom parsing
     special_builtin_call_one,
     /// ({ un })
@@ -538,16 +543,32 @@ pub const Tag = enum(u8) {
 };
 
 pub fn isBitfield(nodes: Node.List.Slice, node: NodeIndex) bool {
+    return bitfieldWidth(nodes, node, false) != null;
+}
+
+/// Returns null if node is not a bitfield. If inspect_lval is true, this function will
+/// recurse into implicit lval_to_rval casts (useful for arithmetic conversions)
+pub fn bitfieldWidth(nodes: Node.List.Slice, node: NodeIndex, inspect_lval: bool) ?u32 {
+    if (node == .none) return null;
     switch (nodes.items(.tag)[@enumToInt(node)]) {
         .member_access_expr, .member_access_ptr_expr => {
             const member = nodes.items(.data)[@enumToInt(node)].member;
             var ty = nodes.items(.ty)[@enumToInt(member.lhs)];
             if (ty.isPtr()) ty = ty.elemType();
-            const record_ty = ty.get(.@"struct") orelse ty.get(.@"union") orelse return false;
+            const record_ty = ty.get(.@"struct") orelse ty.get(.@"union") orelse return null;
             const field = record_ty.data.record.fields[member.index];
-            return field.bit_width != null;
+            return field.bit_width;
         },
-        else => return false,
+        .implicit_cast => {
+            if (!inspect_lval) return null;
+
+            const data = nodes.items(.data)[@enumToInt(node)];
+            return switch (data.cast.kind) {
+                .lval_to_rval => bitfieldWidth(nodes, data.cast.operand, false),
+                else => null,
+            };
+        },
+        else => return null,
     }
 }
 
@@ -942,6 +963,28 @@ fn dumpNode(tree: Tree, node: NodeIndex, level: u32, mapper: StringInterner.Type
             try w.writeAll("else:\n");
             try tree.dumpNode(tree.data[data.if3.body + 1], level + delta, mapper, color, w);
         },
+        .builtin_types_compatible_p => {
+            std.debug.assert(tree.nodes.items(.tag)[@enumToInt(data.bin.lhs)] == .invalid);
+            std.debug.assert(tree.nodes.items(.tag)[@enumToInt(data.bin.rhs)] == .invalid);
+
+            try w.writeByteNTimes(' ', level + half);
+            try w.writeAll("lhs: ");
+
+            const lhs_ty = tree.nodes.items(.ty)[@enumToInt(data.bin.lhs)];
+            if (color) util.setColor(TYPE, w);
+            try lhs_ty.dump(mapper, tree.comp.langopts, w);
+            if (color) util.setColor(.reset, w);
+            try w.writeByte('\n');
+
+            try w.writeByteNTimes(' ', level + half);
+            try w.writeAll("rhs: ");
+
+            const rhs_ty = tree.nodes.items(.ty)[@enumToInt(data.bin.rhs)];
+            if (color) util.setColor(TYPE, w);
+            try rhs_ty.dump(mapper, tree.comp.langopts, w);
+            if (color) util.setColor(.reset, w);
+            try w.writeByte('\n');
+        },
         .if_then_stmt => {
             try w.writeByteNTimes(' ', level + half);
             try w.writeAll("cond:\n");
@@ -1165,6 +1208,7 @@ fn dumpNode(tree: Tree, node: NodeIndex, level: u32, mapper: StringInterner.Type
         .nullptr_literal,
         .int_literal,
         .char_literal,
+        .float16_literal,
         .float_literal,
         .double_literal,
         .string_literal_expr,

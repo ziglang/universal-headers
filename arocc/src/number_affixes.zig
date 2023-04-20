@@ -74,6 +74,15 @@ pub const Suffix = enum {
     // float and imaginary float
     F, IF,
 
+    // _Float16
+    F16,
+
+    // Imaginary _Bitint
+    IWB, IUWB,
+
+    // _Bitint
+    WB, UWB,
+
     // zig fmt: on
 
     const Tuple = struct { Suffix, []const []const u8 };
@@ -81,20 +90,25 @@ pub const Suffix = enum {
     const IntSuffixes = &[_]Tuple{
         .{ .U, &.{"U"} },
         .{ .L, &.{"L"} },
+        .{ .WB, &.{"WB"} },
         .{ .UL, &.{ "U", "L" } },
+        .{ .UWB, &.{ "U", "WB" } },
         .{ .LL, &.{"LL"} },
         .{ .ULL, &.{ "U", "LL" } },
 
         .{ .I, &.{"I"} },
 
+        .{ .IWB, &.{ "I", "WB" } },
         .{ .IU, &.{ "I", "U" } },
         .{ .IL, &.{ "I", "L" } },
         .{ .IUL, &.{ "I", "U", "L" } },
+        .{ .IUWB, &.{ "I", "U", "WB" } },
         .{ .ILL, &.{ "I", "LL" } },
         .{ .IULL, &.{ "I", "U", "LL" } },
     };
 
     const FloatSuffixes = &[_]Tuple{
+        .{ .F16, &.{"F16"} },
         .{ .F, &.{"F"} },
         .{ .L, &.{"L"} },
 
@@ -110,7 +124,7 @@ pub const Suffix = enum {
             .float => FloatSuffixes,
             .int => IntSuffixes,
         };
-        var scratch: [2]u8 = undefined;
+        var scratch: [3]u8 = undefined;
         top: for (suffixes) |candidate| {
             const tag = candidate[0];
             const parts = candidate[1];
@@ -129,16 +143,27 @@ pub const Suffix = enum {
 
     pub fn isImaginary(suffix: Suffix) bool {
         return switch (suffix) {
-            .I, .IL, .IF, .IU, .IUL, .ILL, .IULL => true,
-            .None, .L, .F, .U, .UL, .LL, .ULL => false,
+            .I, .IL, .IF, .IU, .IUL, .ILL, .IULL, .IWB, .IUWB => true,
+            .None, .L, .F16, .F, .U, .UL, .LL, .ULL, .WB, .UWB => false,
         };
     }
 
     pub fn isSignedInteger(suffix: Suffix) bool {
         return switch (suffix) {
-            .None, .L, .LL, .I, .IL, .ILL => true,
-            .U, .UL, .ULL, .IU, .IUL, .IULL => false,
-            .F, .IF => unreachable,
+            .None, .L, .LL, .I, .IL, .ILL, .WB, .IWB => true,
+            .U, .UL, .ULL, .IU, .IUL, .IULL, .UWB, .IUWB => false,
+            .F, .IF, .F16 => unreachable,
+        };
+    }
+
+    pub fn signedness(suffix: Suffix) std.builtin.Signedness {
+        return if (suffix.isSignedInteger()) .signed else .unsigned;
+    }
+
+    pub fn isBitInt(suffix: Suffix) bool {
+        return switch (suffix) {
+            .WB, .UWB, .IWB, .IUWB => true,
+            else => false,
         };
     }
 };
