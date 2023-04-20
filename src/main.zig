@@ -6,14 +6,14 @@ const Target = std.Target;
 const assert = std.debug.assert;
 
 const arocc = @import("arocc");
-const espresso = @import("espresso.zig");
+const RawToken = arocc.Tokenizer.Token;
+const Token = arocc.Tree.Token;
+const Tokenizer = arocc.Tokenizer;
 
 const Input = struct {
     path: []const u8,
     target: Target,
-    // These need to be unique enough to distinguish between the inputs.
-    // In other words, no two inputs should have an identical set of defines.
-    defines: []const NamedDefine,
+    defines: []const []const u8,
 };
 
 const inputs = [_]Input{
@@ -26,131 +26,96 @@ const inputs = [_]Input{
     //        .ofmt = .elf,
     //    },
     //},
+    .{
+        .path = "x86_64-linux-musl",
+        .target = .{
+            .cpu = Target.Cpu.baseline(.x86_64),
+            .os = Target.Os.Tag.linux.defaultVersionRange(.x86_64),
+            .abi = .musl,
+            .ofmt = .elf,
+        },
+        .defines = &.{
+            "__x86_64__",
+            "__linux__",
+            "__ZIG_ABI_MUSL__",
+        },
+    },
+    .{
+        .path = "aarch64-linux-musl",
+        .target = .{
+            .cpu = Target.Cpu.baseline(.aarch64),
+            .os = Target.Os.Tag.linux.defaultVersionRange(.aarch64),
+            .abi = .musl,
+            .ofmt = .elf,
+        },
+        .defines = &.{
+            "__aarch64__",
+            "__linux__",
+            "__ZIG_ABI_MUSL__",
+        },
+    },
     //.{
-    //    .path = "x86_64-linux-musl",
+    //    .path = "x86_64-macos.11-none",
     //    .target = .{
     //        .cpu = Target.Cpu.baseline(.x86_64),
-    //        .os = Target.Os.Tag.linux.defaultVersionRange(.x86_64),
-    //        .abi = .musl,
-    //        .ofmt = .elf,
+    //        .os = .{
+    //            .tag = .macos,
+    //            .version_range = .{
+    //                .semver = .{
+    //                    .min = .{ .major = 11, .minor = 0, .patch = 0 },
+    //                    .max = .{ .major = 11, .minor = std.math.maxInt(u32) },
+    //                },
+    //            },
+    //        },
+    //        .abi = .none,
+    //        .ofmt = .macho,
+    //    },
+    //    .defines = &.{
+    //        .{
+    //            .name = "__APPLE__",
+    //            .define = .def,
+    //        },
+    //        .{
+    //            .name = "__ZIG_OS_VERSION_MIN_MAJOR__",
+    //            .define = .{ .string = "11" },
+    //        },
     //    },
     //},
-    .{
-        .path = "x86_64-macos.11-none",
-        .target = .{
-            .cpu = Target.Cpu.baseline(.x86_64),
-            .os = .{
-                .tag = .macos,
-                .version_range = .{
-                    .semver = .{
-                        .min = .{ .major = 11, .minor = 0, .patch = 0 },
-                        .max = .{ .major = 11, .minor = std.math.maxInt(u32) },
-                    },
-                },
-            },
-            .abi = .none,
-            .ofmt = .macho,
-        },
-        .defines = &.{
-            .{
-                .name = "__APPLE__",
-                .define = .def,
-            },
-            .{
-                .name = "__ZIG_OS_VERSION_MIN_MAJOR__",
-                .define = .{ .string = "11" },
-            },
-        },
-    },
-    .{
-        .path = "x86_64-macos.12-none",
-        .target = .{
-            .cpu = Target.Cpu.baseline(.x86_64),
-            .os = .{
-                .tag = .macos,
-                .version_range = .{
-                    .semver = .{
-                        .min = .{ .major = 12, .minor = 0, .patch = 0 },
-                        .max = .{ .major = 12, .minor = std.math.maxInt(u32) },
-                    },
-                },
-            },
-            .abi = .none,
-            .ofmt = .macho,
-        },
-        .defines = &.{
-            .{
-                .name = "__APPLE__",
-                .define = .def,
-            },
-            .{
-                .name = "__ZIG_OS_VERSION_MIN_MAJOR__",
-                .define = .{ .string = "12" },
-            },
-        },
-    },
+    //.{
+    //    .path = "x86_64-macos.12-none",
+    //    .target = .{
+    //        .cpu = Target.Cpu.baseline(.x86_64),
+    //        .os = .{
+    //            .tag = .macos,
+    //            .version_range = .{
+    //                .semver = .{
+    //                    .min = .{ .major = 12, .minor = 0, .patch = 0 },
+    //                    .max = .{ .major = 12, .minor = std.math.maxInt(u32) },
+    //                },
+    //            },
+    //        },
+    //        .abi = .none,
+    //        .ofmt = .macho,
+    //    },
+    //    .defines = &.{
+    //        .{
+    //            .name = "__APPLE__",
+    //            .define = .def,
+    //        },
+    //        .{
+    //            .name = "__ZIG_OS_VERSION_MIN_MAJOR__",
+    //            .define = .{ .string = "12" },
+    //        },
+    //    },
+    //},
 };
 
 /// Key is include path
 const HeaderTable = std.StringHashMap(std.ArrayListUnmanaged(Header));
-const Defines = std.StringArrayHashMapUnmanaged(Define);
-
-const NamedDefine = struct {
-    name: []const u8,
-    define: Define,
-};
-
-const Define = union(enum) {
-    undef,
-    def,
-    string: []const u8,
-
-    fn eql(a: Define, b: Define) bool {
-        switch (a) {
-            .undef => return b == .undef,
-            .def => return b == .def,
-            .string => |a_s| switch (b) {
-                .undef, .def => return false,
-                .string => |b_s| return mem.eql(u8, a_s, b_s),
-            },
-        }
-    }
-};
 
 const Header = struct {
     input: *const Input,
     source_bytes: []const u8,
-};
-
-// This is using Conjunctive Normal Form.
-// The inner list is each Define OR'd together.
-// The outer list AND's those inner lists together.
-const Clauses = struct {
-    conjunctives: [][]NamedDefine,
-};
-
-const Symbol = struct {
-    // This field acts as a condition. If the condition holds, then the
-    // identifier exists with contents.
-    clauses: Clauses,
-    identifier: []const u8,
-    contents: []const u8,
-
-    pub fn format(value: Symbol, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
-        _ = fmt;
-        _ = options;
-        try writer.print("Symbol '{s}'\n", .{value.identifier});
-        try writer.print("  contents: {s}\n", .{value.contents});
-        for (value.clauses.conjunctives) |conj| {
-            try writer.writeAll("  AND\n");
-            try writer.writeAll("    OR\n");
-            for (conj) |def| switch (def.define) {
-                .def => try writer.print("      {s}\n", .{def.name}),
-                .undef => try writer.print("      !{s}\n", .{def.name}),
-                .string => |s| try writer.print("      {s} == {s}\n", .{ def.name, s }),
-            };
-        }
-    }
 };
 
 pub fn main() !void {
@@ -198,6 +163,11 @@ pub fn main() !void {
 
         while (try walker.next()) |entry| {
             if (entry.kind != .File) continue;
+            if (entry.path[0] == '.') continue;
+
+            // testing only 1 file for now:
+            if (!mem.endsWith(u8, entry.path, "alltypes.h")) continue;
+
             const gop = try header_table.getOrPut(entry.path);
             if (!gop.found_existing) {
                 gop.key_ptr.* = try arena.dupe(u8, entry.path);
@@ -217,403 +187,313 @@ pub fn main() !void {
 
     var it = header_table.iterator();
     while (it.next()) |entry| {
-        std.debug.print("merge '{s}'...\n", .{entry.key_ptr.*});
-        var merger: Merger = .{
-            .arena = arena,
-            .h_path = entry.key_ptr.*,
-            .headers = entry.value_ptr.items,
-            .in_path = in_path,
-            .sys_include = sys_include,
-        };
-        try merger.merge();
+        const h_path = entry.key_ptr.*;
+        std.debug.print("merge '{s}'...\n", .{h_path});
 
-        if (fs.path.dirname(merger.h_path)) |dirname| {
-            try out_dir.dir.makePath(dirname);
+        // parse the headers into graphs
+        for (entry.value_ptr.items) |header| {
+            std.debug.print("doing {s} now\n", .{header.input.path});
+            const graph = try parseHeaderIntoGraph(arena, h_path, header, sys_include);
+
+            for (graph.nodes) |node| {
+                std.debug.print("node: definition: '{s}' => '{s}'\n", .{ node.definition.name, node.definition.source });
+            }
         }
 
-        var out_file = try out_dir.dir.createFile(merger.h_path, .{});
-        defer out_file.close();
+        // topological sort the graphs
 
-        var bw = std.io.bufferedWriter(out_file.writer());
-        const w = bw.writer();
+        // consume nodes from inputs to output
 
-        try w.writeAll("#pragma once\n");
+        // render output
 
-        try merger.minimize(w);
+        //var out_file = try out_dir.dir.createFile(h_path, .{});
+        //defer out_file.close();
 
-        try bw.flush();
+        //var bw = std.io.bufferedWriter(out_file.writer());
+        //const w = bw.writer();
+
+        ////try w.writeAll("#pragma once\n");
+
+        //try bw.flush();
     }
 }
 
-const Merger = struct {
-    arena: Allocator,
-    h_path: []const u8,
-    headers: []Header,
-    in_path: []const u8,
-    sys_include: []const u8,
+const Graph = struct {
+    nodes: []Node,
+};
 
-    all_symbols: std.ArrayListUnmanaged(Symbol) = .{},
+const Node = union(enum) {
+    condition: Condition,
+    definition: Definition,
+};
 
-    fn merge(m: *Merger) !void {
-        // Walk the full tree of the input, exploding each header into the full set of
-        // key-value pairs.
-        for (m.headers) |header| {
-            try addSymbolsFromHeader(m, header);
-        }
-    }
+// This is using Conjunctive Normal Form.
+// The inner list is each Define OR'd together.
+// The outer list AND's those inner lists together.
+const Condition = struct {
+    conjunctives: [][]NamedDefine,
+};
 
-    fn minimize(m: *Merger, writer: anytype) !void {
-        var symbols_by_name = std.StringArrayHashMap(std.ArrayList(Symbol)).init(m.arena);
-        for (m.all_symbols.items) |symbol| {
-            const gop = try symbols_by_name.getOrPut(symbol.identifier);
-            if (!gop.found_existing) {
-                gop.value_ptr.* = std.ArrayList(Symbol).init(m.arena);
-            }
-            try gop.value_ptr.append(symbol);
-        }
+const NamedDefine = struct {
+    name: []const u8,
+    define: Define,
+};
 
-        for (symbols_by_name.values()) |symbols| {
-            const first = symbols.items[0];
+const Define = union(enum) {
+    undef,
+    def,
+    string: []const u8,
 
-            std.debug.print("minimizing boolean expression for symbol '{s}'\n", .{first.identifier});
-
-            var in_labels = std.ArrayList([]const u8).init(m.arena);
-            const out_label = "z";
-
-            var start: u16 = 0;
-            var encoding = std.StringArrayHashMap(struct {
-                index: u16,
-                def: NamedDefine,
-            }).init(m.arena);
-            for (symbols.items) |symbol| {
-                for (symbol.clauses.conjunctives) |conj| {
-                    for (conj) |def| {
-                        const name = switch (def.define) {
-                            .def, .undef => try std.fmt.allocPrint(m.arena, "{s}", .{def.name}),
-                            .string => |s| try std.fmt.allocPrint(m.arena, "{s} == {s}", .{ def.name, s }),
-                        };
-                        const gop = try encoding.getOrPut(name);
-                        if (!gop.found_existing) {
-                            const index = @intCast(u16, in_labels.items.len);
-                            const enc = try std.fmt.allocPrint(m.arena, "a_{d}", .{start});
-                            try in_labels.append(enc);
-                            gop.value_ptr.* = .{
-                                .index = index,
-                                .def = def,
-                            };
-                            start += 1;
-                        }
-                    }
-                }
-            }
-
-            var encoded_input = std.ArrayList(u8).init(m.arena);
-            const in_writer = encoded_input.writer();
-            try in_writer.writeAll("INORDER = ");
-            for (in_labels.items) |label| {
-                try in_writer.print("{s} ", .{label});
-            }
-            try in_writer.writeAll(";\n");
-            try in_writer.print("OUTORDER = {s};\n", .{out_label});
-
-            try in_writer.print("{s} = ", .{out_label});
-            for (symbols.items, 0..) |symbol, i| {
-                for (symbol.clauses.conjunctives, 0..) |conj, k| {
-                    for (conj, 0..) |def, j| {
-                        const name = switch (def.define) {
-                            .def, .undef => try std.fmt.allocPrint(m.arena, "{s}", .{def.name}),
-                            .string => |s| try std.fmt.allocPrint(m.arena, "{s} == {s}", .{ def.name, s }),
-                        };
-                        const index = encoding.get(name).?.index;
-                        const enc = in_labels.items[index];
-                        try in_writer.print("(", .{});
-                        switch (def.define) {
-                            .def, .string => try in_writer.print("{s}", .{enc}),
-                            .undef => try in_writer.print("!{s}", .{enc}),
-                        }
-                        if (conj.len > 1 and j < conj.len - 1) {
-                            try in_writer.print(" | ", .{});
-                        } else {
-                            try in_writer.print(")", .{});
-                        }
-                    }
-
-                    if (symbol.clauses.conjunctives.len > 1 and k < symbol.clauses.conjunctives.len - 1) {
-                        try in_writer.print(" & ", .{});
-                    }
-                }
-                if (symbols.items.len > 1 and i < symbols.items.len - 1) {
-                    try in_writer.print(" | ", .{});
-                }
-            }
-            try in_writer.writeAll(";\n");
-            try in_writer.writeByte(0);
-
-            var tt = std.ArrayList(u8).init(m.arena);
-            try espresso.eqnToTruthTable(encoded_input.items[0 .. encoded_input.items.len - 1 :0], tt.writer());
-            try tt.append(0);
-
-            const pla = try espresso.PLA.openMem(tt.items[0 .. tt.items.len - 1 :0]);
-            defer pla.deinit();
-            const cost = try pla.minimize();
-            _ = cost;
-
-            try writer.print("#if ", .{});
-
-            var output_labels = std.ArrayList([]const u8).init(m.arena);
-            for (encoding.keys(), 0..) |_, i| {
-                const def = encoding.values()[i].def;
-                const name = switch (def.define) {
-                    .def, .undef => try std.fmt.allocPrint(m.arena, "defined({s})", .{def.name}),
-                    .string => |s| try std.fmt.allocPrint(m.arena, "{s} == {s}", .{ def.name, s }),
-                };
-                try output_labels.append(name);
-            }
-
-            try pla.writeSolution(output_labels.items, writer);
-            try writer.writeByte('\n');
-
-            if (first.contents.len == 0) {
-                try writer.print("#define {s}\n", .{first.identifier});
-            } else {
-                try writer.print("#define {s} {s}\n", .{ first.identifier, first.contents });
-            }
-
-            try writer.print("#endif\n", .{});
-        }
-    }
-
-    fn addSymbolsFromHeader(m: *Merger, header: Header) !void {
-        if (!mem.eql(u8, m.h_path, "sys/appleapiopts.h")) return; // TODO remove this
-
-        std.debug.print("iterate: {s}/{s}\n", .{ header.input.path, m.h_path });
-
-        std.debug.print("find include guards: {s}/{s}\n", .{ header.input.path, m.h_path });
-        const include_guard_name = name: {
-            var comp = arocc.Compilation.init(m.arena);
-            defer comp.deinit();
-
-            comp.target = header.input.target;
-
-            try comp.system_include_dirs.append(try comp.gpa.dupe(u8, m.sys_include));
-
-            try comp.addDefaultPragmaHandlers();
-
-            if (comp.target.abi == .msvc or comp.target.os.tag == .windows) {
-                comp.langopts.setEmulatedCompiler(.msvc);
-            }
-
-            var pp = arocc.Preprocessor.init(&comp);
-            defer pp.deinit();
-
-            var macro_buf = std.ArrayList(u8).init(comp.gpa);
-            defer macro_buf.deinit();
-
-            try pp.addBuiltinMacros();
-
-            const builtin = try comp.generateBuiltinMacros(&macro_buf);
-            const source = try comp.addSourceFromBuffer(m.h_path, header.source_bytes);
-
-            _ = try pp.preprocess(builtin);
-            const eof = try pp.preprocess(source);
-            try pp.tokens.append(pp.comp.gpa, eof);
-
-            assert(pp.include_guards.count() == 1);
-            var it = pp.include_guards.iterator();
-            const entry = it.next().?;
-            const include_guard_name = entry.value_ptr.*;
-            break :name try m.arena.dupe(u8, include_guard_name);
-        };
-        std.debug.print("include guard: {s}\n", .{include_guard_name});
-
-        // We will repeatedly invoke Aro, bailing out when we see a dependency on
-        // an unrecognized macro. In such case, we add it to the stack, and invoke
-        // Aro for each possibility.
-        var invoke_stack = std.ArrayList(Defines).init(m.arena);
-
-        {
-            // The first invocation is empty, no macros are available to inspect, except
-            // for the input macros.
-            var init_defines: Defines = .{};
-            for (header.input.defines) |kv| {
-                try init_defines.put(m.arena, kv.name, kv.define);
-            }
-            try invoke_stack.append(init_defines);
-        }
-
-        while (invoke_stack.popOrNull()) |macro_set| {
-            {
-                std.debug.print("invoke with inspectable macros:", .{});
-                var it = macro_set.iterator();
-                while (it.next()) |entry| {
-                    const name = entry.key_ptr.*;
-                    std.debug.print(" {s}", .{name});
-                }
-                std.debug.print("\n", .{});
-            }
-
-            var comp = arocc.Compilation.init(m.arena);
-            defer comp.deinit();
-
-            comp.target = header.input.target;
-            comp.skip_standard_macros = true;
-            try comp.system_include_dirs.append(try std.fmt.allocPrint(comp.gpa, "{s}/{s}", .{
-                m.in_path, header.input.path,
-            }));
-            try comp.system_include_dirs.append(try comp.gpa.dupe(u8, m.sys_include));
-
-            try comp.addDefaultPragmaHandlers();
-
-            if (comp.target.abi == .msvc or comp.target.os.tag == .windows) {
-                comp.langopts.setEmulatedCompiler(.msvc);
-            }
-
-            var pp = arocc.Preprocessor.init(&comp);
-            defer pp.deinit();
-            pp.preserve_whitespace = true;
-
-            var macro_buf = std.ArrayList(u8).init(comp.gpa);
-            defer macro_buf.deinit();
-
-            //try pp.addBuiltinMacros();
-
-            // Ignore include guard
-            try pp.ok_defines.put(comp.gpa, include_guard_name, {});
-
-            {
-                var it = macro_set.iterator();
-                while (it.next()) |entry| {
-                    const name = entry.key_ptr.*;
-                    try pp.ok_defines.put(comp.gpa, name, {});
-                    switch (entry.value_ptr.*) {
-                        .def => {
-                            try macro_buf.writer().print("#define {s}\n", .{name});
-                        },
-                        .undef => {},
-                        .string => |s| {
-                            try macro_buf.writer().print("#define {s} {s}\n", .{ name, s });
-                        },
-                    }
-                }
-            }
-
-            const builtin = try comp.generateBuiltinMacros(&macro_buf);
-            const source = try comp.addSourceFromBuffer(m.h_path, header.source_bytes);
-
-            _ = try pp.preprocess(builtin);
-            const eof = pp.preprocess(source) catch |err| switch (err) {
-                error.UnexpectedMacro => {
-                    const macro_name = try m.arena.dupe(u8, pp.unexpected_macro);
-                    std.debug.print("branch on '{s}', adding both ifdef and ifndef to stack\n", .{
-                        macro_name,
-                    });
-                    var def_case = try macro_set.clone(comp.gpa);
-                    var undef_case = try macro_set.clone(comp.gpa);
-                    try def_case.put(comp.gpa, macro_name, .def);
-                    try undef_case.put(comp.gpa, macro_name, .undef);
-                    try invoke_stack.appendSlice(&.{ def_case, undef_case });
-                    continue;
-                },
-                else => |e| return e,
-            };
-            try pp.tokens.append(pp.comp.gpa, eof);
-
-            if (comp.diag.list.items.len != 0) {
-                comp.renderErrors();
-                // TODO output errors and warnings
-                continue;
-            }
-
-            {
-                // Remove uninteresting macros
-                for (header.input.defines) |kv| {
-                    _ = pp.defines.remove(kv.name);
-                }
-            }
-
-            var it = pp.defines.iterator();
-            while (it.next()) |entry| {
-                const name = entry.key_ptr.*;
-                const tokens = entry.value_ptr.tokens;
-                // TODO strip whitespace and comments
-                const body = b: {
-                    if (tokens.len == 0) break :b "";
-                    const source_bytes = comp.getSource(tokens[0].source).buf;
-                    break :b source_bytes[tokens[0].start..tokens[tokens.len - 1].end];
-                };
-
-                // omit the include guard
-                if (mem.eql(u8, name, include_guard_name)) continue;
-
-                // avoid emitting symbols which would define a macro already defined
-                if (macro_set.get(name)) |dep_macro| {
-                    switch (dep_macro) {
-                        .def => if (body.len == 0) continue,
-                        .string => |s| if (mem.eql(u8, body, s)) continue,
-                        .undef => {},
-                    }
-                }
-                std.debug.print("found macro: '{s}': '{s}'\n", .{ name, body });
-                try m.all_symbols.append(m.arena, .{
-                    .clauses = try definesToClauses(m.arena, macro_set),
-                    .identifier = try m.arena.dupe(u8, name),
-                    .contents = try m.arena.dupe(u8, body),
-                });
-            }
-
-            //var i: u32 = 0;
-            //while (true) : (i += 1) {
-            //    var cur: arocc.Preprocessor.Token = pp.tokens.get(i);
-            //    switch (cur.id) {
-            //        .eof => break,
-            //        .nl => {},
-            //        .keyword_pragma => {
-            //            std.debug.print("{s}: error: found pragma\n", .{h_path});
-            //            std.process.exit(1);
-            //            //const pragma_name = pp.expandedSlice(pp.tokens.get(i + 1));
-            //            //const end_idx = mem.indexOfScalarPos(Token.Id, pp.tokens.items(.id), i, .nl) orelse i + 1;
-            //            //const pragma_len = @intCast(u32, end_idx) - i;
-
-            //            //if (pp.comp.getPragma(pragma_name)) |prag| {
-            //            //    if (!prag.shouldPreserveTokens(pp, i + 1)) {
-            //            //        i += pragma_len;
-            //            //        cur = pp.tokens.get(i);
-            //            //        continue;
-            //            //    }
-            //            //}
-            //            //try w.writeAll("#pragma");
-            //            //i += 1;
-            //            //while (true) : (i += 1) {
-            //            //    cur = pp.tokens.get(i);
-            //            //    if (cur.id == .nl) {
-            //            //        try w.writeByte('\n');
-            //            //        break;
-            //            //    }
-            //            //    try w.writeByte(' ');
-            //            //    const slice = pp.expandedSlice(cur);
-            //            //    try w.writeAll(slice);
-            //            //}
-            //        },
-            //        .whitespace => {},
-            //        else => {
-            //            const slice = pp.expandedSlice(cur);
-            //            std.debug.print("found macro: '{s}'\n", .{slice});
-            //        },
-            //    }
-            //}
+    fn eql(a: Define, b: Define) bool {
+        switch (a) {
+            .undef => return b == .undef,
+            .def => return b == .def,
+            .string => |a_s| switch (b) {
+                .undef, .def => return false,
+                .string => |b_s| return mem.eql(u8, a_s, b_s),
+            },
         }
     }
 };
 
-/// converts e.g. `a and b and c` to `(a) and (b) and (c)`
-fn definesToClauses(arena: Allocator, defines: Defines) !Clauses {
-    const conjunctives = try arena.alloc([]NamedDefine, defines.count());
-    for (conjunctives, 0..) |*inner_list, i| {
-        inner_list.* = try arena.create([1]NamedDefine);
-        inner_list.*[0] = .{
-            .name = defines.keys()[i],
-            .define = defines.values()[i],
-        };
+const Definition = struct {
+    // example: "_Addr"
+    name: []const u8,
+    // example: "#define _Addr long"
+    source: []const u8,
+};
+
+fn parseHeaderIntoGraph(arena: Allocator, h_path: []const u8, header: Header, sys_include: []const u8) !Graph {
+    var nodes = std.ArrayList(Node).init(arena);
+
+    var comp = arocc.Compilation.init(arena);
+    defer comp.deinit();
+
+    comp.target = header.input.target;
+    try comp.system_include_dirs.append(sys_include);
+
+    try comp.addDefaultPragmaHandlers();
+
+    if (comp.target.abi == .msvc or comp.target.os.tag == .windows) {
+        comp.langopts.setEmulatedCompiler(.msvc);
     }
-    return .{ .conjunctives = conjunctives };
+
+    var pp = arocc.Preprocessor.init(&comp);
+    defer pp.deinit();
+
+    var macro_buf = std.ArrayList(u8).init(comp.gpa);
+    defer macro_buf.deinit();
+
+    //try pp.addBuiltinMacros();
+
+    const source = try comp.addSourceFromBuffer(h_path, header.source_bytes);
+
+    var guard_name = pp.findIncludeGuard(source);
+
+    pp.preprocess_count += 1;
+    var tokenizer = arocc.Tokenizer{
+        .buf = source.buf,
+        .comp = pp.comp,
+        .source = source.id,
+    };
+
+    var if_level: u8 = 0;
+    //var if_kind = std.PackedIntArray(u2, 256).init([1]u2{0} ** 256);
+    //const until_else = 0;
+    //const until_endif = 1;
+    //const until_endif_seen_else = 2;
+
+    var start_of_line = true;
+
+    while (true) {
+        var tok = tokenizer.next();
+        switch (tok.id) {
+            .hash => if (!start_of_line) try pp.tokens.append(pp.gpa, tokFromRaw(tok)) else {
+                const directive = tokenizer.nextNoWS();
+                switch (directive.id) {
+                    .keyword_error, .keyword_warning => {
+                        @panic("TODO keyword_error, keyword_warning");
+                    },
+                    .keyword_if => {
+                        @panic("TODO keyword_if");
+                    },
+                    .keyword_ifdef => {
+                        @panic("TODO keyword_ifdef");
+                    },
+                    .keyword_ifndef => {
+                        @panic("TODO keyword_ifndef");
+                    },
+                    .keyword_elif => {
+                        @panic("TODO keyword_elif");
+                    },
+                    .keyword_else => {
+                        @panic("TODO keyword_else");
+                    },
+                    .keyword_endif => {
+                        @panic("TODO keyword_endif");
+                    },
+                    .keyword_define => try handleKeywordDefine(arena, source, &nodes, &tokenizer),
+                    .keyword_undef => {
+                        @panic("TODO keyword_undef");
+                    },
+                    .keyword_include => {
+                        @panic("TODO keyword_include");
+                    },
+                    .keyword_include_next => {
+                        @panic("TODO include_next");
+                    },
+                    .keyword_pragma => {
+                        @panic("TODO pragma");
+                    },
+                    .keyword_line => {
+                        @panic("unsupported directive: #line");
+                    },
+                    .pp_num => {
+                        @panic("TODO pp_num??");
+                    },
+                    .nl => {},
+                    .eof => {
+                        if (if_level != 0) @panic("unterminated_conditional_directive");
+                        @panic("TODO eof inside hash");
+                    },
+                    else => {
+                        try pp.err(tok, .invalid_preprocessing_directive);
+                        skipToNl(&tokenizer);
+                    },
+                }
+            },
+            .whitespace => {},
+            .nl => {
+                start_of_line = true;
+            },
+            .eof => {
+                if (if_level != 0) @panic("unterminated_conditional_directive");
+                // The following check needs to occur here and not at the top of the function
+                // because a pragma may change the level during preprocessing
+                if (source.buf.len > 0 and source.buf[source.buf.len - 1] != '\n') {
+                    @panic("newline_eof");
+                }
+                if (guard_name) |name| {
+                    std.debug.print("found include guard: '{s}'\n", .{name});
+                    @panic("TODO handle include guard");
+                }
+                break;
+            },
+            else => {
+                std.debug.print("TODO handle token '{s}'\n", .{@tagName(tok.id)});
+            },
+        }
+    }
+
+    return .{
+        .nodes = nodes.items,
+    };
+}
+
+/// Convert a token from the Tokenizer into a token used by the parser.
+fn tokFromRaw(raw: RawToken) Token {
+    return .{
+        .id = raw.id,
+        .loc = .{
+            .id = raw.source,
+            .byte_offset = raw.start,
+            .line = raw.line,
+        },
+    };
+}
+
+// Skip until newline, ignore other tokens.
+fn skipToNl(tokenizer: *Tokenizer) void {
+    while (true) {
+        const tok = tokenizer.next();
+        if (tok.id == .nl or tok.id == .eof) return;
+    }
+}
+
+fn handleKeywordDefine(arena: Allocator, source: arocc.Source, nodes: *std.ArrayList(Node), tokenizer: *Tokenizer) !void {
+    // We want to extract two things:
+    // 1. the macro identifier name.
+    // 2. the source code for the macro, with whitespace stripped.
+    var macro_src_bytes = std.ArrayList(u8).init(arena);
+
+    const macro_name = tokenizer.nextNoWS();
+    const macro_name_bytes = tokSlice(source, macro_name);
+    try macro_src_bytes.appendSlice("#define ");
+    try macro_src_bytes.appendSlice(macro_name_bytes);
+    assert(macro_name.id != .keyword_defined);
+    assert(macro_name.id.isMacroIdentifier());
+    var macro_name_token_id = macro_name.id;
+    macro_name_token_id.simplifyMacroKeyword();
+    switch (macro_name_token_id) {
+        .identifier, .extended_identifier => {},
+        else => assert(!macro_name_token_id.isMacroIdentifier()),
+    }
+
+    // Check for function macros and empty defines.
+    var first = tokenizer.next();
+    switch (first.id) {
+        .nl, .eof => {
+            try nodes.append(.{
+                .definition = .{
+                    .name = try arena.dupe(u8, macro_name_bytes),
+                    .source = macro_src_bytes.items,
+                },
+            });
+            return;
+        },
+        .whitespace => first = tokenizer.next(),
+        .l_paren => @panic("TODO macro function"),
+        else => @panic("whitespace_after_macro_name"),
+    }
+    if (first.id == .hash_hash) {
+        @panic("hash_hash_at_start");
+    }
+    first.id.simplifyMacroKeyword();
+
+    try macro_src_bytes.append(' ');
+
+    var need_ws = false;
+    // Collect the token body and validate any ## found.
+    var tok = first;
+    while (true) {
+        tok.id.simplifyMacroKeyword();
+        switch (tok.id) {
+            .hash_hash => {
+                const next = tokenizer.nextNoWS();
+                switch (next.id) {
+                    .nl, .eof => {
+                        @panic("hash_hash_at_end");
+                    },
+                    .hash_hash => {
+                        @panic("hash_hash_at_end");
+                    },
+                    else => {},
+                }
+                try macro_src_bytes.appendSlice(tokSlice(source, tok));
+                try macro_src_bytes.appendSlice(tokSlice(source, next));
+            },
+            .nl, .eof => break,
+            .whitespace => need_ws = true,
+            else => {
+                if (tok.id != .whitespace and need_ws) {
+                    need_ws = false;
+                    try macro_src_bytes.appendSlice(tokSlice(source, .{ .id = .macro_ws, .source = .generated }));
+                }
+                try macro_src_bytes.appendSlice(tokSlice(source, tok));
+            },
+        }
+        tok = tokenizer.next();
+    }
+
+    try nodes.append(.{
+        .definition = .{
+            .name = try arena.dupe(u8, macro_name_bytes),
+            .source = macro_src_bytes.items,
+        },
+    });
+}
+
+pub fn tokSlice(source: arocc.Source, tok: Tokenizer.Token) []const u8 {
+    if (tok.id.lexeme()) |s| return s;
+    return source.buf[tok.start..tok.end];
 }
