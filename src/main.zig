@@ -137,11 +137,11 @@ pub fn main() !void {
     const ZigEnv = struct {
         lib_dir: []const u8,
     };
-    var json_token_stream = std.json.TokenStream.init(result.stdout);
-    const zig_env = try std.json.parse(ZigEnv, &json_token_stream, .{
-        .allocator = arena,
+    const zig_env = try std.json.parseFromSlice(ZigEnv, arena, result.stdout, .{
         .ignore_unknown_fields = true,
     });
+    defer std.json.parseFree(ZigEnv, arena, zig_env);
+
     const sys_include = try fs.path.join(arena, &.{ zig_env.lib_dir, "include" });
 
     var in_dir = try fs.cwd().openDir(in_path, .{});
