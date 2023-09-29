@@ -134,7 +134,7 @@ pub fn main() !void {
                             break;
                         } else {
                             const vline = versionstack.pop();
-                            try outwriter.print("#endif //{s}\n", .{vline});
+                            try outwriter.print("#endif /*{s}*/\n", .{vline});
                         }
                     }
 
@@ -173,7 +173,7 @@ pub fn main() !void {
 
             while (versionstack.items.len > 0) {
                 const versionline = versionstack.pop();
-                try outwriter.print("#endif //{s}\n", .{versionline});
+                try outwriter.print("#endif /*{s}*/\n", .{versionline});
             }
         }
     }
