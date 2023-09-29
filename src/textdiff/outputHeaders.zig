@@ -86,8 +86,9 @@ pub fn main() !void {
         if (std.fs.path.dirname(filepath)) |dirname| {
             try std.fs.cwd().makePath(dirname);
         }
-        std.debug.print("createFile {s}\n", .{filepath});
+        //std.debug.print("createFile {s}\n", .{filepath});
         var outfile = try std.fs.cwd().createFile(filepath, .{});
+        defer outfile.close();
         var outwriter = outfile.writer();
 
         if (versionStr) |version| {

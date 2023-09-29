@@ -1,5 +1,7 @@
 const std = @import("std");
 
+const debug = false;
+
 pub fn main() !void {
     var arena_allocator = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     const arena = arena_allocator.allocator();
@@ -24,7 +26,7 @@ pub fn main() !void {
     _ = args.skip();
     const inDir = args.next() orelse return;
     const outDir = args.next() orelse return;
-    const versionStr = args.next() orelse return;
+    const versionStr = std.fs.path.basename(args.next() orelse return);
 
     var dir = try std.fs.cwd().openIterableDir(inDir, .{});
     defer dir.close();
@@ -35,7 +37,7 @@ pub fn main() !void {
             continue;
         }
 
-        //if (!std.mem.eql(u8, entry.basename, "unistd_ext.h")) continue;
+        //if (!std.mem.eql(u8, entry.basename, "e_os2.h")) continue;
 
         //std.debug.print("entry: base {s} path {s}\n", .{ entry.basename, entry.path });
 
@@ -62,18 +64,18 @@ pub fn main() !void {
         if (std.fs.path.dirname(outpath)) |dirname| {
             try std.fs.cwd().makePath(dirname);
         }
-        std.debug.print("createFile {s}\n", .{outpath});
+        if (debug) std.debug.print("createFile {s}\n", .{outpath});
         var outfile = try std.fs.cwd().createFile(outpath, .{});
+        defer outfile.close();
         var outwriter = outfile.writer();
 
         var outputing = std.ArrayList(u2).init(arena);
         var in_comment: bool = false;
         for (inlines.items) |line| {
-            std.debug.print("{d} line {s}\n", .{ outputing.items.len, line });
+            if (debug) std.debug.print("{d} {s}\n", .{ outputing.items.len, line });
             var com = in_comment;
             if (!in_comment and std.mem.indexOf(u8, line, "/*") != null and std.mem.indexOf(u8, line, "*/") == null) {
                 in_comment = true;
-                com = true;
             } else if (in_comment and std.mem.indexOf(u8, line, "/*") == null and std.mem.indexOf(u8, line, "*/") != null) {
                 in_comment = false; // next line will be out of comment
             }
@@ -81,7 +83,9 @@ pub fn main() !void {
             if (!com and std.mem.startsWith(u8, trimmed, "#")) {
                 trimmed = trimmed[1..];
                 trimmed = std.mem.trimLeft(u8, trimmed, " ");
+                if (debug) std.debug.print("trimmed {s}\n", .{trimmed});
                 if (std.mem.startsWith(u8, trimmed, "if")) {
+                    if (debug) std.debug.print("- if\n", .{});
                     if (std.mem.indexOf(u8, trimmed, "_ZIG_UH_TEST") != null) {
                         if (std.mem.indexOf(u8, trimmed, versionStr) != null) {
                             try outputing.append(3);

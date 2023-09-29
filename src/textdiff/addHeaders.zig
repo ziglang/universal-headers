@@ -1,5 +1,7 @@
 const std = @import("std");
 
+const debug = false;
+
 pub fn main() !void {
     var arena_allocator = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     const arena = arena_allocator.allocator();
@@ -34,11 +36,11 @@ pub fn main() !void {
 
     var walker = try dir.walk(arena);
     while (try walker.next()) |entry| {
-        if (entry.kind != .file) {
+        if (entry.kind != .file and entry.kind != .sym_link) {
             continue;
         }
 
-        //if (!std.mem.eql(u8, entry.basename, "unistd_ext.h")) continue;
+        //if (!std.mem.eql(u8, entry.basename, "_ctype.h")) continue;
 
         //std.debug.print("entry: base {s} path {s}\n", .{ entry.basename, entry.path });
 
@@ -49,7 +51,7 @@ pub fn main() !void {
 
         var worklines = std.ArrayList([]const u8).init(arena);
         {
-            std.debug.print("createFile {s}\n", .{workpath});
+            if (debug) std.debug.print("createFile {s}\n", .{workpath});
             if (std.fs.path.dirname(workpath)) |dirname| {
                 try std.fs.cwd().makePath(dirname);
             }
@@ -144,7 +146,7 @@ pub fn main() !void {
         var it = std.mem.splitScalar(u8, diff_stdout.items, '\n');
         while (it.next()) |line| {
             if (ignore > 0) {
-                std.debug.print("ignore {d} {s}\n", .{ ignore, line });
+                if (debug) std.debug.print("ignore {d} {s}\n", .{ ignore, line });
                 ignore -= 1;
                 continue;
             }
@@ -167,7 +169,7 @@ pub fn main() !void {
 
                 start -= 1;
 
-                std.debug.print("diff a says {s} -> {d}-{d}\n", .{ line, start, end });
+                if (debug) std.debug.print("diff a says {s} -> {d}-{d}\n", .{ line, start, end });
 
                 // from line_adj to addafter, the lines were the same, so add the version
                 for (last_line..@intCast(line_adj + @as(isize, @intCast(addafter)))) |i| {
@@ -215,7 +217,7 @@ pub fn main() !void {
                 }
                 start2 -= 1;
 
-                std.debug.print("diff c says {s} -> {d}-{d} to {d}-{d}\n", .{ line, start1, end1, start2, end2 });
+                if (debug) std.debug.print("diff c says {s} -> {d}-{d} to {d}-{d}\n", .{ line, start1, end1, start2, end2 });
 
                 // from line_adj to start1, the lines were the same, so add the version
                 for (last_line..@intCast(line_adj + @as(isize, @intCast(start1)))) |i| {
@@ -248,7 +250,7 @@ pub fn main() !void {
 
                 start -= 1;
 
-                std.debug.print("diff d says {s} -> {d}-{d}\n", .{ line, start, end });
+                if (debug) std.debug.print("diff d says {s} -> {d}-{d}\n", .{ line, start, end });
 
                 for (last_line..@intCast(line_adj + @as(isize, @intCast(start)))) |i| {
                     const old = versionlines.items[i];
@@ -260,7 +262,7 @@ pub fn main() !void {
                 ignore = end - start;
                 last_line = @intCast(line_adj + @as(isize, @intCast(end)));
             } else {
-                std.debug.print("diff says {s}\n", .{line});
+                //std.debug.print("diff says {s}\n", .{line});
                 return error.asdf;
             }
         }
@@ -295,6 +297,7 @@ pub fn main() !void {
 }
 
 pub fn addContext(arena: std.mem.Allocator, lines: *std.ArrayList([]const u8)) !void {
+    var seen_contexts = std.ArrayList(u32).init(arena);
     var context = std.ArrayList(u32).init(arena);
     try context.append(0);
     var in_comment: bool = false;
@@ -309,19 +312,6 @@ pub fn addContext(arena: std.mem.Allocator, lines: *std.ArrayList([]const u8)) !
         var com = in_comment;
         if (!in_comment and std.mem.indexOf(u8, line, "/*") != null and std.mem.indexOf(u8, line, "*/") == null) {
             in_comment = true;
-            com = true;
-            // need to context the comments as well otherwise it might break into two pieces
-            var ii = i;
-            const fnv = std.hash.Fnv1a_32;
-            var h = fnv.init();
-            h.value = context.items[context.items.len - 1];
-            while (true) : (ii += 1) {
-                h.update(lines.items[ii]);
-                if (std.mem.indexOf(u8, lines.items[ii], "/*") == null and std.mem.indexOf(u8, lines.items[ii], "*/") != null) {
-                    break;
-                }
-            }
-            try context.append(h.final());
         } else if (in_comment and std.mem.indexOf(u8, line, "/*") == null and std.mem.indexOf(u8, line, "*/") != null) {
             in_comment = false; // next line will be out of comment
             pop_context = true;
@@ -334,12 +324,44 @@ pub fn addContext(arena: std.mem.Allocator, lines: *std.ArrayList([]const u8)) !
                 trimmed = trimmed[1..];
                 trimmed = std.mem.trimLeft(u8, trimmed, " ");
                 if (std.mem.startsWith(u8, trimmed, "if")) {
-                    const new_context = newContext(lines.items, i, context.items[context.items.len - 1]);
-                    try context.append(new_context);
+                    var ctx = newContext(lines.items, i, context.items[context.items.len - 1]);
+                    for (seen_contexts.items) |sc| {
+                        if (ctx == sc) {
+                            ctx += 1;
+                            break;
+                        }
+                    }
+                    try context.append(ctx);
+                    try seen_contexts.append(ctx);
                 } else if (std.mem.startsWith(u8, trimmed, "endif")) {
                     pop_context = true;
                 }
             }
+        }
+
+        if (!com and in_comment) {
+            // just transitioned into a comment
+            // need to context the comments as well otherwise it might break into two pieces
+            var ii = i;
+            const fnv = std.hash.Fnv1a_32;
+            var h = fnv.init();
+            h.value = context.items[context.items.len - 1];
+            while (true) : (ii += 1) {
+                h.update(lines.items[ii]);
+                h.update("1"); // update even on an empty line
+                if (std.mem.indexOf(u8, lines.items[ii], "/*") == null and std.mem.indexOf(u8, lines.items[ii], "*/") != null) {
+                    break;
+                }
+            }
+            var ctx = h.final();
+            for (seen_contexts.items) |sc| {
+                if (ctx == sc) {
+                    ctx += 1;
+                    break;
+                }
+            }
+            try context.append(ctx);
+            try seen_contexts.append(ctx);
         }
 
         var buf = try arena.alloc(u8, 9 + line.len);
@@ -355,21 +377,20 @@ pub fn newContext(lines: [][]const u8, i: usize, ctx: u32) u32 {
     const fnv = std.hash.Fnv1a_32;
     var h = fnv.init();
     h.value = ctx;
-    std.debug.print("updating hash: {s}\n", .{lines[i]});
+    if (debug) std.debug.print("updating hash: {s}\n", .{lines[i]});
     h.update(lines[i]);
     var ii = i + 1;
     var depth: usize = 0;
     var in_comment: bool = false;
-    while (true) : (ii += 1) {
+    while (ii < lines.len) : (ii += 1) {
         const line = lines[ii];
         var com = in_comment;
         if (!in_comment and std.mem.indexOf(u8, line, "/*") != null and std.mem.indexOf(u8, line, "*/") == null) {
             in_comment = true;
-            com = true;
         } else if (in_comment and std.mem.indexOf(u8, line, "/*") == null and std.mem.indexOf(u8, line, "*/") != null) {
             in_comment = false; // next line will be out of comment
         }
-        std.debug.print("{s} {d} {s}\n", .{ if (com) "c" else " ", depth, line });
+        if (debug) std.debug.print("{s} {d} {s}\n", .{ if (com) "c" else " ", depth, line });
         if (com) {
             continue;
         }
@@ -381,12 +402,12 @@ pub fn newContext(lines: [][]const u8, i: usize, ctx: u32) u32 {
                 depth += 1;
             } else if (std.mem.startsWith(u8, trimmed, "elif")) {
                 if (depth == 0) {
-                    std.debug.print("updating hash: {s}\n", .{line});
+                    if (debug) std.debug.print("updating hash: {s}\n", .{line});
                     h.update(line);
                 }
             } else if (std.mem.startsWith(u8, trimmed, "endif")) {
                 if (depth == 0) {
-                    std.debug.print("updating hash: {s}\n", .{line});
+                    if (debug) std.debug.print("updating hash: {s}\n", .{line});
                     h.update(line);
                     break;
                 }
