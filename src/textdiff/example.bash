@@ -1,7 +1,7 @@
 
 if [ -d uh_workspace ];
 then
-    echo "directory uh_workspace already exists, need to remove it"
+    echo "directory uh_workspace already exists, need to remove it - rm -r uh_* ?"
     exit 1
 fi
 
@@ -56,13 +56,13 @@ done
 
 
 echo "outputHeaders"
-./zig-out/bin/outputHeaders univ_headers || exit 1
+./zig-out/bin/outputHeaders uh_headers || exit 1
 
 
 for i in $HEADER_LIST;
 do
     echo "testHeaders $i"
-    ./zig-out/bin/testHeaders univ_headers uh_test $i
+    ./zig-out/bin/testHeaders uh_headers uh_test $i
     diff -uBwr $i uh_test | grep -v "Only in" > uh_diff
     if [ -s uh_diff ]
     then
