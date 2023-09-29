@@ -44,8 +44,8 @@ pub fn main() !void {
 
         //std.debug.print("entry: base {s} path {s}\n", .{ entry.basename, entry.path });
 
+        // read work-in-progress file into memory
         var workpath = try std.fs.path.join(arena, &.{ "uh_workspace", entry.path });
-
         var worklines = std.ArrayList([]const u8).init(arena);
         {
             var file = try std.fs.cwd().openFile(workpath, .{});
@@ -63,6 +63,7 @@ pub fn main() !void {
             }
         }
 
+        // read work-in-progress sidecar version file into memory
         var buf = try arena.alloc(u8, 1000);
         const versionpath = try std.fmt.bufPrint(buf, "{s}{s}", .{ workpath, extra });
         var versionlines = std.ArrayList([]const u8).init(arena);
@@ -82,6 +83,7 @@ pub fn main() !void {
             }
         }
 
+        // make writer to output file that will be our universal header
         var filepath = try std.fs.path.join(arena, &.{ outDir, entry.path });
         if (std.fs.path.dirname(filepath)) |dirname| {
             try std.fs.cwd().makePath(dirname);
@@ -92,12 +94,18 @@ pub fn main() !void {
         var outwriter = outfile.writer();
 
         if (versionStr) |version| {
+            // this is for debugging
             for (worklines.items, versionlines.items) |workline, versionline| {
                 if (std.mem.indexOf(u8, versionline, version) != null) {
                     try outwriter.print("{s}\n", .{workline[9..]});
                 }
             }
         } else {
+            // output the universal header
+            // - we maintain a stack of the version #if blocks we are inside of
+            // - if the version changes, then either:
+            // - - it is a subset of the previous version, so we can add a new nested #if block
+            // - - it is not a subset, so #endif the block and start a new one
             var versionstack = std.ArrayList([]const u8).init(arena);
             for (worklines.items, versionlines.items) |workline, versionline| {
                 if (versionstack.items.len > 0 and std.mem.eql(u8, versionline, versionstack.items[versionstack.items.len - 1])) {

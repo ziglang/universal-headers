@@ -21,7 +21,6 @@ pub fn main() !void {
         }
     }
 
-    // load lines of file into memory
     args = try std.process.argsWithAllocator(arena);
     _ = args.skip();
     const headerDir = args.next() orelse return;
@@ -36,6 +35,8 @@ pub fn main() !void {
 
     var walker = try dir.walk(arena);
     while (try walker.next()) |entry| {
+
+        // only process files and sym links - right now we copy the sym links into regular files
         if (entry.kind != .file and entry.kind != .sym_link) {
             continue;
         }
@@ -44,11 +45,13 @@ pub fn main() !void {
 
         //std.debug.print("entry: base {s} path {s}\n", .{ entry.basename, entry.path });
 
+        // file extension for our sidecar version information
         const extra = ".uhversion.txt";
 
         var filepath = try std.fs.path.join(arena, &.{ headerDir, entry.path });
         var workpath = try std.fs.path.join(arena, &.{ "uh_workspace", entry.path });
 
+        // read all the lines of our work-in-progress file
         var worklines = std.ArrayList([]const u8).init(arena);
         {
             if (debug) std.debug.print("createFile {s}\n", .{workpath});
@@ -70,6 +73,7 @@ pub fn main() !void {
             }
         }
 
+        // read all the lines of our work-in-progress sidecar version file
         buf = try arena.alloc(u8, 1000);
         const versionpath = try std.fmt.bufPrint(buf, "{s}{s}", .{ workpath, extra });
         var versionlines = std.ArrayList([]const u8).init(arena);
@@ -89,6 +93,7 @@ pub fn main() !void {
             }
         }
 
+        // read all the lines of the new file we are going to merge
         var filelines = std.ArrayList([]const u8).init(arena);
         {
             var file = try std.fs.cwd().openFile(filepath, .{});
@@ -110,8 +115,11 @@ pub fn main() !void {
         }
 
         // first add context to the new file
+        // - this prepends each line with a hash value
+        // - solves diff problems later by keeping #if-#endif blocks and comment blocks together
         try addContext(arena, &filelines);
 
+        // write out the new file with added context to a temp file
         {
             var file = try std.fs.cwd().createFile("uh_workfile", .{});
             defer file.close();
@@ -123,6 +131,7 @@ pub fn main() !void {
 
         //std.debug.print("filepath: {s}, workpath: {s}\n", .{ filepath, workpath });
 
+        // run diff and get the output
         var diff_stdout = std.ArrayList(u8).init(arena);
         var diff_stderr = std.ArrayList(u8).init(arena);
         var diff_child = std.process.Child.init(&.{ "diff", "-wdN", workpath, "uh_workfile" }, arena);
@@ -136,7 +145,7 @@ pub fn main() !void {
 
         // worklines has all lines accumulated from headers so far
         // versionlines has versions for all lines in worklines
-        // ctx_stdout.items has new header lines
+        // filelines has new header lines
 
         // go through diff output and adjust worklines and versionlines
         var line_adj: isize = 0;
@@ -275,7 +284,7 @@ pub fn main() !void {
             versionlines.items[i] = try std.fmt.bufPrint(buf, "{s}{s}", .{ old, versionStr });
         }
 
-        // write out worklines and versionlines back to disk
+        // write out work-in-progress file back to disk
         {
             var file = try std.fs.cwd().createFile(workpath, .{});
             defer file.close();
@@ -285,6 +294,7 @@ pub fn main() !void {
             }
         }
 
+        // write out work-in-progress sidecar version file back to disk
         {
             var file = try std.fs.cwd().createFile(versionpath, .{});
             defer file.close();
@@ -296,6 +306,7 @@ pub fn main() !void {
     }
 }
 
+// Prepend each line of this file with a hash to prevent the diff from splitting #if/#endif into separate versions
 pub fn addContext(arena: std.mem.Allocator, lines: *std.ArrayList([]const u8)) !void {
     var seen_contexts = std.ArrayList(u32).init(arena);
     var context = std.ArrayList(u32).init(arena);
@@ -373,6 +384,9 @@ pub fn addContext(arena: std.mem.Allocator, lines: *std.ArrayList([]const u8)) !
     }
 }
 
+// We are given the line containing the first #if
+// - hash that line, any #elif, and the #endif line together
+// - must skip over any nested #if blocks (and comments)
 pub fn newContext(lines: [][]const u8, i: usize, ctx: u32) u32 {
     const fnv = std.hash.Fnv1a_32;
     var h = fnv.init();

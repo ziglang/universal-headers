@@ -2,6 +2,8 @@ const std = @import("std");
 
 const debug = false;
 
+// This utility goes through universal headers and only evaluates the #if blocks that we added to make them universal
+// - what comes out can be diffed against the original headers for testing
 pub fn main() !void {
     var arena_allocator = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     const arena = arena_allocator.allocator();
@@ -41,8 +43,8 @@ pub fn main() !void {
 
         //std.debug.print("entry: base {s} path {s}\n", .{ entry.basename, entry.path });
 
+        // read universal header into memory
         var inpath = try std.fs.path.join(arena, &.{ inDir, entry.path });
-
         var inlines = std.ArrayList([]const u8).init(arena);
         {
             var file = try std.fs.cwd().openFile(inpath, .{});
@@ -69,7 +71,11 @@ pub fn main() !void {
         defer outfile.close();
         var outwriter = outfile.writer();
 
+        // maintain a stack corresponding to #if blocks we are inside of
+        // - bit 1 is if we should be outputting these lines (because the version matches)
+        // - bit 2 is if this #if block is one we added to make the universal header (we don't want to output those)
         var outputing = std.ArrayList(u2).init(arena);
+
         var in_comment: bool = false;
         for (inlines.items) |line| {
             if (debug) std.debug.print("{d} {s}\n", .{ outputing.items.len, line });
