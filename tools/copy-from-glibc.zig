@@ -23,7 +23,7 @@ pub fn main() !void {
 
         var walker = try sub_dir.walk(arena);
         while (try walker.next()) |entry| {
-            if (entry.kind != .File) continue;
+            if (entry.kind != .file) continue;
             const dest_path = try std.fmt.allocPrint(arena, "{s}/{s}.{s}/{s}", .{
                 headers, glibc_target_name, glibc_ver, entry.path,
             });
