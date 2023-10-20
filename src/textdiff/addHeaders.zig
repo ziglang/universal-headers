@@ -109,7 +109,7 @@ pub fn main() !void {
             defer file.close();
             var contents = try file.reader().readAllAlloc(arena, 100 * 1024 * 1024);
 
-            // filter out comments
+            // filter out comments (both /**/ and // styles)
             var i: usize = 0;
             var k: usize = 0;
             var in_comment = false;
@@ -124,6 +124,14 @@ pub fn main() !void {
                     if (in_comment and std.mem.eql(u8, contents[i..][0..2], "*/")) {
                         in_comment = false;
                         i += 2;
+                        continue;
+                    }
+
+                    if (!in_comment and std.mem.eql(u8, contents[i..][0..2], "//")) {
+                        // skip until we get to a newline
+                        while (contents[i] != '\n') {
+                            i += 1;
+                        }
                         continue;
                     }
                 }

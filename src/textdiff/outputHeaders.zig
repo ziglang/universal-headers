@@ -134,7 +134,7 @@ pub fn main() !void {
                             break;
                         } else {
                             const vline = versionstack.pop();
-                            try outwriter.print("#endif /*{s}*/\n", .{vline});
+                            try outwriter.print("#endif /*_ZIG_UH_|{s}*/\n", .{vline});
                         }
                     }
 
@@ -158,7 +158,7 @@ pub fn main() !void {
                             first_v = false;
                             try outwriter.print("defined {s}", .{version});
                         }
-                        try outwriter.print(" OR _ZIG_UH_TEST\n", .{});
+                        try outwriter.print(" OR _ZIG_UH_\n", .{});
 
                         try versionstack.append(versionline);
 
@@ -173,7 +173,7 @@ pub fn main() !void {
 
             while (versionstack.items.len > 0) {
                 const versionline = versionstack.pop();
-                try outwriter.print("#endif /*{s}*/\n", .{versionline});
+                try outwriter.print("#endif /*_ZIG_UH_|{s}*/\n", .{versionline});
             }
         }
     }

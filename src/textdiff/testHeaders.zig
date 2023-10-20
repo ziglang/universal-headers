@@ -92,7 +92,7 @@ pub fn main() !void {
                 if (debug) std.debug.print("trimmed {s}\n", .{trimmed});
                 if (std.mem.startsWith(u8, trimmed, "if")) {
                     if (debug) std.debug.print("- if\n", .{});
-                    if (std.mem.indexOf(u8, trimmed, "_ZIG_UH_TEST") != null) {
+                    if (std.mem.indexOf(u8, trimmed, "_ZIG_UH_") != null) {
                         if (std.mem.indexOf(u8, trimmed, versionStr) != null) {
                             try outputing.append(3);
                         } else {
