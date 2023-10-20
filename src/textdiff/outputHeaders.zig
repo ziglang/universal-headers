@@ -50,7 +50,7 @@ pub fn main() !void {
         {
             var file = try std.fs.cwd().openFile(workpath, .{});
             defer file.close();
-            var contents = try file.reader().readAllAlloc(arena, 20 * 1024 * 1024);
+            var contents = try file.reader().readAllAlloc(arena, 100 * 1024 * 1024);
             while (contents.len > 0 and contents[contents.len - 1] == '\n') {
                 contents = contents[0 .. contents.len - 1];
             }
@@ -70,7 +70,7 @@ pub fn main() !void {
         {
             var file = try std.fs.cwd().openFile(versionpath, .{});
             defer file.close();
-            var contents = try file.reader().readAllAlloc(arena, 20 * 1024 * 1024);
+            var contents = try file.reader().readAllAlloc(arena, 100 * 1024 * 1024);
             while (contents.len > 0 and contents[contents.len - 1] == '\n') {
                 contents = contents[0 .. contents.len - 1];
             }

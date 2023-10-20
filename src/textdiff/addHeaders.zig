@@ -16,7 +16,8 @@ pub fn main() !void {
 
         if (i != 2) {
             std.debug.print("usage: addHeaders <dir>\n", .{});
-            std.debug.print("adds headers from <dir> into uh_workspace\n", .{});
+            std.debug.print("normalizes headers from <dir> into uh_norm/<dir>\n", .{});
+            std.debug.print("adds headers from uh_norm/<dir> into uh_workspace\n", .{});
             return;
         }
     }
@@ -26,6 +27,11 @@ pub fn main() !void {
     const headerDir = args.next() orelse return;
 
     var buf = try arena.alloc(u8, 1000);
+
+    const normalized_dir = try std.fmt.bufPrint(buf, "uh_norm/{s}", .{std.fs.path.basename(headerDir)});
+    std.fs.cwd().makePath(normalized_dir) catch {};
+
+    buf = try arena.alloc(u8, 1000);
     const versionStr = try std.fmt.bufPrint(buf, "{s}|", .{std.fs.path.basename(headerDir)});
 
     var dir = try std.fs.cwd().openIterableDir(headerDir, .{});
@@ -41,7 +47,7 @@ pub fn main() !void {
             continue;
         }
 
-        //if (!std.mem.eql(u8, entry.basename, "_ctype.h")) continue;
+        //if (!std.mem.eql(u8, entry.basename, "ucontext.h")) continue;
 
         //std.debug.print("entry: base {s} path {s}\n", .{ entry.basename, entry.path });
 
@@ -50,6 +56,7 @@ pub fn main() !void {
 
         var filepath = try std.fs.path.join(arena, &.{ headerDir, entry.path });
         var workpath = try std.fs.path.join(arena, &.{ "uh_workspace", entry.path });
+        var normalized_path = try std.fs.path.join(arena, &.{ normalized_dir, entry.path });
 
         // read all the lines of our work-in-progress file
         var worklines = std.ArrayList([]const u8).init(arena);
@@ -60,13 +67,15 @@ pub fn main() !void {
             }
             var file = try std.fs.cwd().createFile(workpath, .{ .read = true, .truncate = false });
             defer file.close();
-            var contents = try file.reader().readAllAlloc(arena, 20 * 1024 * 1024);
+            var contents = try file.reader().readAllAlloc(arena, 100 * 1024 * 1024);
+
             while (contents.len > 0 and contents[contents.len - 1] == '\n') {
                 contents = contents[0 .. contents.len - 1];
             }
 
             if (contents.len > 0) {
                 var it = std.mem.splitScalar(u8, contents, '\n');
+
                 while (it.next()) |line| {
                     try worklines.append(line);
                 }
@@ -80,7 +89,7 @@ pub fn main() !void {
         {
             var file = try std.fs.cwd().createFile(versionpath, .{ .read = true, .truncate = false });
             defer file.close();
-            var contents = try file.reader().readAllAlloc(arena, 20 * 1024 * 1024);
+            var contents = try file.reader().readAllAlloc(arena, 100 * 1024 * 1024);
             while (contents.len > 0 and contents[contents.len - 1] == '\n') {
                 contents = contents[0 .. contents.len - 1];
             }
@@ -98,7 +107,37 @@ pub fn main() !void {
         {
             var file = try std.fs.cwd().openFile(filepath, .{});
             defer file.close();
-            var contents = try file.reader().readAllAlloc(arena, 20 * 1024 * 1024);
+            var contents = try file.reader().readAllAlloc(arena, 100 * 1024 * 1024);
+
+            // filter out comments
+            var i: usize = 0;
+            var k: usize = 0;
+            var in_comment = false;
+            while (i < contents.len) {
+                if (i + 1 < contents.len) {
+                    if (!in_comment and std.mem.eql(u8, contents[i..][0..2], "/*")) {
+                        in_comment = true;
+                        i += 2;
+                        continue;
+                    }
+
+                    if (in_comment and std.mem.eql(u8, contents[i..][0..2], "*/")) {
+                        in_comment = false;
+                        i += 2;
+                        continue;
+                    }
+                }
+
+                if (!in_comment) {
+                    contents[k] = contents[i];
+                    k += 1;
+                }
+
+                i += 1;
+            }
+
+            contents.len = k;
+
             while (contents.len > 0 and contents[contents.len - 1] == '\n') {
                 contents = contents[0 .. contents.len - 1];
             }
@@ -109,7 +148,32 @@ pub fn main() !void {
                     // normalize whitespace (replace tabs with spaces)
                     buf = try arena.alloc(u8, line.len);
                     _ = std.mem.replace(u8, line, "\t", " ", buf);
-                    try filelines.append(buf);
+
+                    // filter out empty lines
+                    var empty = true;
+                    for (buf) |ch| {
+                        if (ch != ' ') {
+                            empty = false;
+                            break;
+                        }
+                    }
+
+                    if (!empty) {
+                        try filelines.append(buf);
+                    }
+                }
+            }
+
+            // write out normalized file back to disk for debugging
+            {
+                if (std.fs.path.dirname(normalized_path)) |dirname| {
+                    try std.fs.cwd().makePath(dirname);
+                }
+                var nfile = try std.fs.cwd().createFile(normalized_path, .{});
+                defer nfile.close();
+                var writer = nfile.writer();
+                for (filelines.items) |line| {
+                    try writer.print("{s}\n", .{line});
                 }
             }
         }
@@ -339,7 +403,6 @@ pub fn addContext(arena: std.mem.Allocator, lines: *std.ArrayList([]const u8)) !
                     for (seen_contexts.items) |sc| {
                         if (ctx == sc) {
                             ctx += 1;
-                            break;
                         }
                     }
                     try context.append(ctx);
@@ -368,7 +431,6 @@ pub fn addContext(arena: std.mem.Allocator, lines: *std.ArrayList([]const u8)) !
             for (seen_contexts.items) |sc| {
                 if (ctx == sc) {
                     ctx += 1;
-                    break;
                 }
             }
             try context.append(ctx);
