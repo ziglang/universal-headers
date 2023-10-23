@@ -1,9 +1,16 @@
 
-# example: ./src/textdiff/compile.bash headers/m68k-linux*
+# example: ./src/textdiff/compile.bash headers/*
 #
-# then run ./src/textdiff/test.bash headers/m68k-linux*
+# then run ./src/textdiff/test.bash headers/*
 
 HEADER_LIST="$@"
+
+# check that all headers exist somewhere in reductions.zig - this check is to
+# make sure when new headers are added reductions.zig is updated
+for i in $HEADER_LIST;
+do
+    grep -q `basename $i` src/textdiff/reductions.zig || { echo "couldn't find '`basename $i`' in reductions.zig, is it new?"; exit 1; }
+done
 
 if [ -d uh_workspace ];
 then

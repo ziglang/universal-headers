@@ -1,4 +1,5 @@
 const std = @import("std");
+const reductions = @import("reductions.zig"){};
 
 pub fn main() !void {
     var arena_allocator = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -40,7 +41,7 @@ pub fn main() !void {
             continue;
         }
 
-        //if (!std.mem.eql(u8, entry.basename, "unistd_ext.h")) continue;
+        //if (!std.mem.eql(u8, entry.basename, "features.h")) continue;
 
         //std.debug.print("entry: base {s} path {s}\n", .{ entry.basename, entry.path });
 
@@ -133,8 +134,8 @@ pub fn main() !void {
                         if (subset) {
                             break;
                         } else {
-                            const vline = versionstack.pop();
-                            try outwriter.print("#endif /*_ZIG_UH_|{s}*/\n", .{vline});
+                            _ = versionstack.pop();
+                            try outwriter.print("#endif /*_ZIG_UH_*/\n", .{});
                         }
                     }
 
@@ -144,21 +145,7 @@ pub fn main() !void {
                     } else {
 
                         // we've put any #endif we need, now start a new #if
-                        try outwriter.print("#if ", .{});
-                        var first_v: bool = true;
-                        var vit = std.mem.splitScalar(u8, versionline, '|');
-                        while (vit.next()) |version| {
-                            if (std.mem.eql(u8, version, "")) {
-                                continue;
-                            }
-
-                            if (!first_v) {
-                                try outwriter.print(" OR ", .{});
-                            }
-                            first_v = false;
-                            try outwriter.print("defined {s}", .{version});
-                        }
-                        try outwriter.print(" OR _ZIG_UH_\n", .{});
+                        try outputIfLine(arena, outwriter, versionline);
 
                         try versionstack.append(versionline);
 
@@ -172,9 +159,62 @@ pub fn main() !void {
             }
 
             while (versionstack.items.len > 0) {
-                const versionline = versionstack.pop();
-                try outwriter.print("#endif /*_ZIG_UH_|{s}*/\n", .{versionline});
+                _ = versionstack.pop();
+                try outwriter.print("#endif /*_ZIG_UH_*/\n", .{});
             }
         }
     }
+}
+
+pub fn outputIfLine(arena: std.mem.Allocator, writer: anytype, versionline: []const u8) !void {
+    var vit = std.mem.splitScalar(u8, versionline, '|');
+    var versions = std.StringArrayHashMap(void).init(arena);
+    while (vit.next()) |version| {
+        if (std.mem.eql(u8, version, "")) {
+            continue;
+        }
+
+        try versions.put(version, {});
+    }
+
+    var replacements = std.ArrayList([]const u8).init(arena);
+
+    inline for (@typeInfo(@TypeOf(reductions)).Struct.fields) |f| {
+        const field = @field(reductions, f.name);
+        var found_all = true;
+        for (0..field.len - 1) |i| {
+            // are all of this reduction's versions here?
+            if (!versions.contains(field[i])) {
+                found_all = false;
+                break;
+            }
+        }
+
+        if (found_all) {
+            // we can replace all these versions with the reduction
+            for (0..field.len - 1) |i| {
+                _ = versions.orderedRemove(field[i]);
+            }
+
+            try replacements.append(field[field.len - 1]);
+        }
+    }
+
+    try writer.print("#if ", .{});
+    var first_v: bool = true;
+    for (replacements.items) |rep| {
+        if (!first_v) {
+            try writer.print(" OR ", .{});
+        }
+        first_v = false;
+        try writer.print("{s}", .{rep});
+    }
+    for (versions.keys()) |version| {
+        if (!first_v) {
+            try writer.print(" OR ", .{});
+        }
+        first_v = false;
+        try writer.print("defined {s}", .{version});
+    }
+    try writer.print(" OR _ZIG_UH_\n", .{});
 }
