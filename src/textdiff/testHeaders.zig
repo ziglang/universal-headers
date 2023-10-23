@@ -1,4 +1,5 @@
 const std = @import("std");
+const reductions = @import("reductions.zig"){};
 
 const debug = false;
 
@@ -93,7 +94,26 @@ pub fn main() !void {
                 if (std.mem.startsWith(u8, trimmed, "if")) {
                     if (debug) std.debug.print("- if\n", .{});
                     if (std.mem.indexOf(u8, trimmed, "_ZIG_UH_") != null) {
+                        var found = false;
                         if (std.mem.indexOf(u8, trimmed, versionStr) != null) {
+                            found = true;
+                        } else {
+                            // look for versionStr in each reduction, and see
+                            // if that reduction matches
+                            inline for (@typeInfo(@TypeOf(reductions)).Struct.fields) |f| blk: {
+                                const field = @field(reductions, f.name);
+                                for (0..field.len - 1) |i| {
+                                    if (std.mem.eql(u8, versionStr, field[i])) {
+                                        if (std.mem.indexOf(u8, trimmed, field[field.len - 1]) != null) {
+                                            found = true;
+                                            break :blk;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        if (found) {
                             try outputing.append(3);
                         } else {
                             try outputing.append(2);
