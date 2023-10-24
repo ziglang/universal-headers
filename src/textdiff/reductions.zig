@@ -1,3 +1,5 @@
+/// For each field in this file, if all of the given versions are in the same
+/// #if line, we replace it with the final line
 aarch64_linux_gnu: []const []const u8 = &[_][]const u8{
     "aarch64_be-linux-gnu.2.32",
     "aarch64_be-linux-gnu.2.33",
