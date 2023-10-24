@@ -1,0 +1,31 @@
+
+zig build
+- should give you (in zig-out/bin): addHeaders, outputHeaders, testHeaders
+- also shells out to diff
+
+
+for the whole thing, run (for me this takes ~30min):
+./src/textdiff/compile.bash headers/*
+
+then to test (takes ~5min):
+./src/textdiff/test.bash headers/*
+
+
+What's going on:
+
+1. addHeaders headers/foo
+- takes files from foo
+- normalizes them into uh_norm
+- for each file:
+    - adds context prefix to each line
+    - outputs to uh_workfile
+    - diffs with file in uh_workspace and modifies uh_workspace
+
+2. outputHeaders uh_headers
+- reads files from uh_workspace and outputs universal headers in uh_headers
+- uses reductions.zig to reduce #if statements
+
+3. testHeaders headers/foo
+- partially evaluates uh_headers for version foo and outputs to uh_test
+- can then diff uh_test uh_norm/foo
+
